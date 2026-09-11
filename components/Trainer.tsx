@@ -9,19 +9,40 @@ type Category = 'main' | 'dakuten' | 'combo';
 type Mode = KanaType | 'mixed';
 type KanaRow = { id:number; kana_type:KanaType; kana:string; answers:string[]; group_key:string; category:Category };
 type Progress = { mastery:number; correct:number; wrong:number; seen:number; lastSeen:number; lastWrong:number; nextDue:number };
-type Prefs = { mode:Mode; categories:Category[]; poolSize:number; sound:boolean };
+type Prefs = { mode:Mode; selectedGroups:string[]; sound:boolean };
+type StoredPrefs = Partial<Prefs> & { categories?:Category[]; poolSize?:number };
 type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number };
 
 const GUEST_KEY='hiraloop_guest_v1';
 const PREF_KEY='nihongo_play_pref_v2';
 const PENDING_KEY='nihongo_play_pending_v2';
-const DEFAULT_PREFS:Prefs={mode:'hiragana',categories:['main'],poolSize:46,sound:true};
 const KANA=kanaRows as KanaRow[];
+const ALL_GROUP_KEYS=Array.from(new Set(KANA.map(c=>c.group_key)));
+const GROUPS_BY_CATEGORY:Record<Category,string[]>={
+  main:ALL_GROUP_KEYS.filter(k=>k.startsWith('main-')),
+  dakuten:ALL_GROUP_KEYS.filter(k=>k.startsWith('dak-')),
+  combo:ALL_GROUP_KEYS.filter(k=>k.startsWith('com-')),
+};
+const DEFAULT_PREFS:Prefs={mode:'hiragana',selectedGroups:[...GROUPS_BY_CATEGORY.main],sound:true};
+const CATEGORY_META:Record<Category,{title:string;sub:string;icon:string}>={
+  main:{title:'MAIN KANA',sub:'Kana cơ bản',icon:'✦'},
+  dakuten:{title:'DAKUTEN KANA',sub:'Âm đục / bán đục',icon:'▱'},
+  combo:{title:'COMBINATION KANA',sub:'Âm ghép',icon:'❀'},
+};
 
 function normalize(v:string){return(v||'').trim().toLowerCase().replace(/\s+/g,'')}
 function keyFor(c:KanaRow){return `${c.kana_type}:${c.kana}`}
 function blankProgress():Progress{return {mastery:0,correct:0,wrong:0,seen:0,lastSeen:0,lastWrong:0,nextDue:0}}
 function safeJson<T>(raw:string|null,fallback:T):T{try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
+function groupLabel(key:string,mode:Mode){
+  const rows=KANA.filter(c=>c.group_key===key);
+  const hira=rows.find(c=>c.kana_type==='hiragana');
+  const kata=rows.find(c=>c.kana_type==='katakana');
+  const romaji=(hira||kata)?.answers[0]||'';
+  if(mode==='mixed')return `${hira?.kana||''}/${kata?.kana||''} · ${romaji}`;
+  const row=rows.find(c=>c.kana_type===mode) || rows[0];
+  return `${row?.kana||''}/${romaji}`;
+}
 
 function localUpdate(base:Progress,ok:boolean):Progress{
   const s={...base},now=Date.now(),mins=s.lastSeen?(now-s.lastSeen)/60000:99999;
@@ -64,11 +85,16 @@ export default function Trainer(){
   const [resetScope,setResetScope]=useState<'hiragana'|'katakana'|'all'>('all');
   const questionStarted=useRef(Date.now());
   const audioRef=useRef<AudioContext|null>(null);
+  const autoNextRef=useRef<number|null>(null);
 
   useEffect(()=>{
-    const p=safeJson<Prefs>(localStorage.getItem(PREF_KEY),DEFAULT_PREFS);
-    const cats=Array.isArray(p.categories)&&p.categories.length?p.categories:DEFAULT_PREFS.categories;
-    setPrefs({...DEFAULT_PREFS,...p,categories:cats});
+    const p=safeJson<StoredPrefs>(localStorage.getItem(PREF_KEY),{});
+    const legacyCats=Array.isArray(p.categories)&&p.categories.length?p.categories:['main' as Category];
+    const migratedGroups=legacyCats.flatMap(cat=>GROUPS_BY_CATEGORY[cat]);
+    const selectedGroups=Array.isArray(p.selectedGroups)
+      ? p.selectedGroups.filter(k=>ALL_GROUP_KEYS.includes(k))
+      : migratedGroups;
+    setPrefs({mode:p.mode||DEFAULT_PREFS.mode,selectedGroups:selectedGroups.length?selectedGroups:[...GROUPS_BY_CATEGORY.main],sound:p.sound??true});
     setGuest(safeJson<Record<string,Progress>>(localStorage.getItem(GUEST_KEY),{}));
     setHydrated(true);
   },[]);
@@ -78,13 +104,13 @@ export default function Trainer(){
 
   const progressFor=useCallback((c:KanaRow)=>((userId?remote:guest)[keyFor(c)]||blankProgress()),[userId,remote,guest]);
   const pool=useMemo(()=>{
-    let rows=KANA.filter(c=>(prefs.mode==='mixed'||c.kana_type===prefs.mode)&&prefs.categories.includes(c.category));
-    rows=rows.sort((a,b)=>a.category.localeCompare(b.category)||a.group_key.localeCompare(b.group_key)||a.id-b.id);
-    return rows.slice(0,Math.min(prefs.poolSize||46,rows.length));
-  },[prefs]);
+    const rows=KANA.filter(c=>(prefs.mode==='mixed'||c.kana_type===prefs.mode)&&prefs.selectedGroups.includes(c.group_key));
+    return rows.sort((a,b)=>a.category.localeCompare(b.category)||a.group_key.localeCompare(b.group_key)||a.id-b.id);
+  },[prefs.mode,prefs.selectedGroups]);
 
   const chooseNext=useCallback(()=>{
-    if(!pool.length){setCurrent(null);return}
+    if(autoNextRef.current!==null){window.clearTimeout(autoNextRef.current);autoNextRef.current=null}
+    if(!pool.length){setCurrent(null);setAnswer('');setLocked(false);setFeedback(null);setWeakOpen(false);return}
     const options=[...pool].sort((a,b)=>priority(progressFor(b))-priority(progressFor(a)));
     let next=options[0];
     if(current&&next?.id===current.id&&options.length>1)next=options[1];
@@ -92,7 +118,7 @@ export default function Trainer(){
     setTimeout(()=>document.querySelector<HTMLInputElement>('#answer')?.focus(),0);
   },[pool,progressFor,current]);
 
-  useEffect(()=>{if(hydrated)chooseNext()},[prefs.mode,prefs.categories.join(','),prefs.poolSize,hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(hydrated)chooseNext()},[prefs.mode,prefs.selectedGroups.join(','),hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadCloud=useCallback(async()=>{
     if(!userId){setRemote({});setRank('Guest');setOnline(false);setSyncText('Guest mode • tiến độ lưu trên máy');return}
@@ -174,7 +200,7 @@ export default function Trainer(){
     const responseMs=Math.min(600000,Date.now()-questionStarted.current);
     if(userId)sendCloud(current,typed,responseMs,uuid(),updated);
     setTimeout(()=>setEffect(''),700);
-    if(ok)setTimeout(()=>chooseNext(),620);
+    if(ok)autoNextRef.current=window.setTimeout(()=>{autoNextRef.current=null;chooseNext()},620);
   }
 
   async function resetProgress(){
@@ -193,11 +219,23 @@ export default function Trainer(){
     setStats({correct:0,wrong:0,streak:0});setWeakOpen(false);chooseNext();
   }
 
-  function toggleCategory(cat:Category){
+  function toggleGroup(groupKey:string){
     setPrefs(p=>{
-      const has=p.categories.includes(cat); if(has&&p.categories.length===1)return p;
-      return {...p,categories:has?p.categories.filter(x=>x!==cat):[...p.categories,cat]};
+      const has=p.selectedGroups.includes(groupKey);
+      return {...p,selectedGroups:has?p.selectedGroups.filter(x=>x!==groupKey):[...p.selectedGroups,groupKey]};
     });
+  }
+
+  function toggleCategory(cat:Category){
+    const keys=GROUPS_BY_CATEGORY[cat];
+    setPrefs(p=>{
+      const allOn=keys.every(k=>p.selectedGroups.includes(k));
+      return {...p,selectedGroups:allOn?p.selectedGroups.filter(k=>!keys.includes(k)):Array.from(new Set([...p.selectedGroups,...keys]))};
+    });
+  }
+
+  function toggleAllGroups(){
+    setPrefs(p=>({ ...p, selectedGroups:ALL_GROUP_KEYS.every(k=>p.selectedGroups.includes(k))?[]:[...ALL_GROUP_KEYS] }));
   }
 
   const n=stats.correct+stats.wrong; const accuracy=n?Math.round(stats.correct/n*100)+'%':'—';
@@ -207,21 +245,41 @@ export default function Trainer(){
     <section className="card modebar" aria-label="Bảng chữ">
       {([['hiragana','あ Hiragana'],['katakana','ア Katakana'],['mixed','あ + ア Mixed']] as [Mode,string][]).map(([m,label])=><button key={m} className={`mode ${prefs.mode===m?'active':''}`} onClick={()=>setPrefs(p=>({...p,mode:m}))}>{label}</button>)}
     </section>
-    <section className="group-picker" aria-label="Nhóm Kana">
-      {([['main','Main Kana','Kana cơ bản'],['dakuten','Dakuten Kana','Âm đục / bán đục'],['combo','Combination Kana','Âm ghép']] as [Category,string,string][]).map(([cat,title,sub])=><button key={cat} className={`group-card ${prefs.categories.includes(cat)?'selected':''}`} onClick={()=>toggleCategory(cat)}><span className="group-check">{prefs.categories.includes(cat)?'✓':'+'}</span><strong>{title}</strong><small>{sub}</small></button>)}
+    <section className="kana-selector" aria-label="Chọn chi tiết bộ Kana">
+      <button className={`selector-all ${ALL_GROUP_KEYS.every(k=>prefs.selectedGroups.includes(k))?'selected':''}`} onClick={toggleAllGroups}>
+        <span className="select-box">{ALL_GROUP_KEYS.every(k=>prefs.selectedGroups.includes(k))?'✓':''}</span>
+        <strong>ALL KANA</strong>
+        <small>{pool.length} chữ đang dùng</small>
+      </button>
+      <div className="selector-grid">
+        {(['main','dakuten','combo'] as Category[]).map(cat=>{
+          const keys=GROUPS_BY_CATEGORY[cat];
+          const allOn=keys.every(k=>prefs.selectedGroups.includes(k));
+          const meta=CATEGORY_META[cat];
+          return <section className={`selector-column selector-${cat}`} key={cat}>
+            <div className="selector-title"><span className="selector-icon">{meta.icon}</span><div><strong>{meta.title}</strong><small>{meta.sub}</small></div></div>
+            <button className={`selector-category-toggle ${allOn?'selected':''}`} onClick={()=>toggleCategory(cat)}>
+              <span className="select-box">{allOn?'✓':''}</span> ALL {meta.title}
+            </button>
+            <div className="selector-chips">
+              {keys.map(key=>{const selected=prefs.selectedGroups.includes(key);return <button key={key} className={`selector-chip ${selected?'selected':''}`} onClick={()=>toggleGroup(key)} aria-pressed={selected}><span className="select-box">{selected?'✓':''}</span><span>{groupLabel(key,prefs.mode)}</span></button>})}
+            </div>
+          </section>;
+        })}
+      </div>
     </section>
     <main className="layout">
       <section className={`card trainer ${effect}`} id="trainer">
         <div className="eyebrow"><span className={`status-dot ${online?'online':''}`} /> <span>{syncText}</span></div>
         <div className="question"><div><div className={`kana ${effect==='pop'?'pop':''}`}>{current?.kana||'—'}</div><div className="hint">{current?`${current.kana_type==='hiragana'?'Hiragana':'Katakana'} • nhập romaji`:'Không có chữ trong phạm vi đã chọn'}</div></div></div>
         <div className={`feedback ${feedback?(feedback.ok?'ok':'bad'):''}`}>{feedback&&<>{feedback.ok?'✓':'✕'} {feedback.text}</>}</div>
-        <input id="answer" className="answer" value={answer} onChange={e=>setAnswer(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')check(false)}} disabled={locked||!current} autoComplete="off" autoCapitalize="off" spellCheck={false} placeholder="Nhập romaji…" />
+        <input id="answer" className="answer" value={answer} onChange={e=>setAnswer(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();if(locked){if(feedback&&!feedback.ok)chooseNext()}else check(false)}}} readOnly={locked} disabled={!current} autoComplete="off" autoCapitalize="off" spellCheck={false} placeholder="Nhập romaji…" />
         <div className="controls"><button className="btn dark" onClick={()=>check(false)}>{locked?'Câu tiếp':'Kiểm tra'}</button><button className="btn" onClick={()=>check(true)} disabled={locked}>Bỏ qua</button></div>
       </section>
       <aside className="side">
         <section className="card"><h2>Phiên học</h2><div className="stats"><div className="stat"><b>{stats.correct}</b><span>Đúng</span></div><div className="stat"><b>{stats.wrong}</b><span>Sai</span></div><div className="stat"><b>{accuracy}</b><span>Độ chính xác</span></div><div className="stat"><b>{stats.streak}</b><span>Chuỗi đúng</span></div></div></section>
         <section className="card"><div className="weak-head"><h2>Chữ cần ôn nhiều</h2><button className="btn" onClick={()=>setWeakOpen(x=>!x)}>{weakOpen?'Ẩn':'Hiện'}</button></div>{!weakOpen?<div className="hidden-note">Nội dung đang được ẩn để tránh lộ đáp án.</div>:<div className="weak-list">{weak.length?weak.map(({c,s})=><div className="weak" key={c.id}><strong>{c.kana}</strong><small>{Math.round(s.mastery)}%</small></div>):<div className="hidden-note">Chưa đủ dữ liệu.</div>}</div>}</section>
-        <section className="card"><h2>Cài đặt</h2><div className="settings"><div><label>Số chữ trong pool</label><select value={prefs.poolSize} onChange={e=>setPrefs(p=>({...p,poolSize:Number(e.target.value)}))}>{[10,20,46,80,120,208].map(x=><option key={x}>{x}</option>)}</select></div><button className="btn" onClick={()=>{setPrefs(p=>({...p,sound:!p.sound}));if(!prefs.sound)setTimeout(()=>sound(true),0)}}>Âm thanh: {prefs.sound?'Bật':'Tắt'}</button><div><label>Đặt lại tiến độ</label><div className="reset-row"><select value={resetScope} onChange={e=>setResetScope(e.target.value as 'hiragana'|'katakana'|'all')}><option value="hiragana">Hiragana</option><option value="katakana">Katakana</option><option value="all">Tất cả</option></select><button className="btn danger" onClick={resetProgress}>Đặt lại</button></div></div></div></section>
+        <section className="card"><h2>Cài đặt</h2><div className="settings"><div className="selection-summary"><span>Bộ đang học</span><strong>{pool.length} kana • {prefs.selectedGroups.length}/{ALL_GROUP_KEYS.length} nhóm</strong></div><button className="btn" onClick={()=>{setPrefs(p=>({...p,sound:!p.sound}));if(!prefs.sound)setTimeout(()=>sound(true),0)}}>Âm thanh: {prefs.sound?'Bật':'Tắt'}</button><div><label>Đặt lại tiến độ</label><div className="reset-row"><select value={resetScope} onChange={e=>setResetScope(e.target.value as 'hiragana'|'katakana'|'all')}><option value="hiragana">Hiragana</option><option value="katakana">Katakana</option><option value="all">Tất cả</option></select><button className="btn danger" onClick={resetProgress}>Đặt lại</button></div></div></div></section>
         <section className="card rank-card"><div><div className="eyebrow">Điểm tuần</div><div className="rank-big">{rank}</div></div><a className="btn" href="/leaderboard">Xem BXH</a></section>
       </aside>
     </main>
