@@ -11,7 +11,7 @@ type KanaRow = { id:number; kana_type:KanaType; kana:string; answers:string[]; g
 type Progress = { mastery:number; correct:number; wrong:number; seen:number; lastSeen:number; lastWrong:number; nextDue:number; reviewFlag:boolean; reviewStep:number; weakLevel:number; weakCorrectStreak:number };
 type Prefs = { mode:Mode; selectedGroups:string[]; sound:boolean };
 type StoredPrefs = Partial<Prefs> & { categories?:Category[]; poolSize?:number };
-type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number };
+type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number; answeredAt?:number };
 
 const GUEST_KEY='hiraloop_guest_v1';
 const PREF_KEY='nihongo_play_pref_v2';
@@ -138,6 +138,7 @@ export default function Trainer(){
   const questionStarted=useRef(Date.now());
   const audioRef=useRef<AudioContext|null>(null);
   const autoNextRef=useRef<number|null>(null);
+  const resettingRef=useRef(false);
 
   useEffect(()=>{
     const p=safeJson<StoredPrefs>(localStorage.getItem(PREF_KEY),{});
@@ -164,7 +165,10 @@ export default function Trainer(){
   const chooseNext=useCallback((focusInput=true)=>{
     if(autoNextRef.current!==null){window.clearTimeout(autoNextRef.current);autoNextRef.current=null}
     if(!pool.length){setCurrent(null);setAnswer('');setLocked(false);setFeedback(null);setWeakOpen(false);return}
-    const options=[...pool].sort((a,b)=>priority(progressFor(b))-priority(progressFor(a)));
+    const options=pool
+      .map(c=>({c,score:priority(progressFor(c))}))
+      .sort((a,b)=>b.score-a.score)
+      .map(x=>x.c);
     let next=options[0];
     if(current&&next?.id===current.id&&options.length>1)next=options[1];
     setCurrent(next); setAnswer(''); setLocked(false); setFeedback(null); setWeakOpen(false); setEffect(''); questionStarted.current=Date.now();
@@ -219,13 +223,16 @@ export default function Trainer(){
   },[prefs.sound]);
 
   const flushPending=useCallback(async()=>{
-    if(!userId)return;
+    if(!userId||resettingRef.current)return;
     const all=safeJson<Pending[]>(localStorage.getItem(PENDING_KEY),[]);
     const mine=all.filter(x=>x.ownerId===userId), other=all.filter(x=>x.ownerId!==userId);
     if(!mine.length)return;
     const keep:Pending[]=[];
     for(const item of mine){
-      try{const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});if(!res.ok)keep.push(item)}catch{keep.push(item)}
+      try{
+        const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});
+        if(!res.ok&&(res.status>=500||res.status===401||res.status===429))keep.push(item);
+      }catch{keep.push(item)}
     }
     localStorage.setItem(PENDING_KEY,JSON.stringify([...other,...keep].slice(-500)));
     if(!keep.length)loadCloud(); else {setOnline(false);setSyncText(`Còn ${keep.length} câu chờ sync`)}
@@ -235,11 +242,18 @@ export default function Trainer(){
 
   async function sendCloud(c:KanaRow,typed:string,responseMs:number,eventId:string,optimistic:Progress){
     if(!userId)return;
-    const item:Pending={ownerId:userId,eventId,kana:c.kana,kanaType:c.kana_type,answer:typed,responseMs};
+    const item:Pending={ownerId:userId,eventId,kana:c.kana,kanaType:c.kana_type,answer:typed,responseMs,answeredAt:Date.now()};
     try{
       const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});
-      if(!res.ok)throw new Error('sync');
+      if(!res.ok){
+        if(res.status>=400&&res.status<500&&res.status!==401&&res.status!==429){
+          setSyncText('Câu trả lời không thể đồng bộ');
+          return;
+        }
+        throw new Error('sync');
+      }
       const data=await res.json();
+      if(data.stale){await loadCloud();return}
       setRemote(prev=>({...prev,[keyFor(c)]:normalizeProgress({
         ...optimistic,
         mastery:Number(data.mastery)||optimistic.mastery,
@@ -287,11 +301,19 @@ export default function Trainer(){
 
   async function resetProgress(){
     const label=resetScope==='all'?'toàn bộ':resetScope==='hiragana'?'Hiragana':'Katakana';
-    if(!window.confirm(`Đặt lại ${label} tiến độ? Hành động này không thể hoàn tác.`))return;
+    if(!window.confirm(`Đặt lại ${label} tiến độ học? Lịch sử và điểm BXH đã ghi nhận sẽ được giữ lại.`))return;
     if(userId){
-      const res=await fetch('/api/progress/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scope:resetScope})});
-      if(!res.ok)return;
-      await loadCloud();
+      resettingRef.current=true;
+      try{
+        const res=await fetch('/api/progress/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scope:resetScope})});
+        if(!res.ok)return;
+        const pending=safeJson<Pending[]>(localStorage.getItem(PENDING_KEY),[]);
+        const filtered=pending.filter(item=>item.ownerId!==userId||(resetScope!=='all'&&item.kanaType!==resetScope));
+        localStorage.setItem(PENDING_KEY,JSON.stringify(filtered.slice(-500)));
+        await loadCloud();
+      }finally{
+        resettingRef.current=false;
+      }
     }else{
       setGuest(prev=>{
         if(resetScope==='all')return {};
