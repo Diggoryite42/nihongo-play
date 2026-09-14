@@ -62,7 +62,9 @@ export default function AuthControls({ signedIn, displayName = null }: { signedI
           ? 'Tên này đã có người dùng. Hãy chọn tên khác.'
           : payload.error === 'invalid_name'
             ? 'Tên phải dài 2–24 ký tự và không chứa ký tự điều khiển.'
-            : 'Không thể lưu tên lúc này.');
+            : payload.error === 'rate_limited'
+              ? `Bạn đổi tên quá nhanh. Thử lại sau ${Math.max(1, Number(payload.retryAfter)||1)} giây.`
+              : 'Không thể lưu tên lúc này.');
         return;
       }
       const nextName = String(payload.displayName || profileDraft);
