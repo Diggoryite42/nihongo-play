@@ -18,29 +18,21 @@ function deriveNeonAuthBaseUrl(connectionString?: string) {
   }
 }
 
-// Vercel's Neon integration always injects DATABASE_URL. Newer integrations may
-// also inject NEON_AUTH_BASE_URL. Deriving the public Auth endpoint from the
-// branch database hostname keeps production and branch URLs aligned without
-// requiring the user to copy another environment variable manually.
+// The Auth endpoint may be injected directly by Neon. Deriving only the public
+// endpoint from DATABASE_URL is safe and keeps preview branches self-contained.
 const baseUrl = process.env.NEON_AUTH_BASE_URL || deriveNeonAuthBaseUrl(databaseUrl);
 
-// Neon Auth requires a stable 32+ character cookie-signing secret. Prefer an
-// explicit secret when provided. For this small app, derive a server-only
-// fallback from the already-secret database URL. Rotating database credentials
-// will invalidate existing sessions, which is safe.
-const rawSecret = process.env.NEON_AUTH_COOKIE_SECRET
-  || (databaseUrl ? `nihongo-play:auth-cookie:${databaseUrl}` : undefined);
-
-// Normalize any configured value into a stable 64-character secret. This also
-// prevents a mistakenly short environment value from breaking a production
-// build while keeping the actual cookie signing material server-only.
-const secret = rawSecret
-  ? createHash('sha256').update(`nihongo-play:cookie-secret:${rawSecret}`).digest('hex')
+// Cookie signing must use an independent secret. Never derive it from the
+// database credential: rotating or leaking one secret must not compromise both.
+const configuredSecret = process.env.NEON_AUTH_COOKIE_SECRET;
+const secret = configuredSecret
+  ? createHash('sha256').update(`nihongo-play:cookie-secret:${configuredSecret}`).digest('hex')
   : undefined;
 
-if (!baseUrl || !secret) {
-  if (process.env.VERCEL) {
-    throw new Error('DATABASE_URL is required for Neon Auth on Vercel');
+if (process.env.VERCEL) {
+  if (!baseUrl) throw new Error('NEON_AUTH_BASE_URL or DATABASE_URL is required for Neon Auth on Vercel');
+  if (!configuredSecret || configuredSecret.length < 32) {
+    throw new Error('NEON_AUTH_COOKIE_SECRET must be configured with at least 32 characters on Vercel');
   }
 }
 

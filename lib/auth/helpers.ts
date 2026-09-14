@@ -14,17 +14,24 @@ export async function requireUser() {
 
 export async function ensureProfile(user: { id: string; email?: string | null; name?: string | null; image?: string | null }) {
   const sql = db();
+  // Use a deterministic unique-ish fallback for first creation. Once the user
+  // chooses a public name, normal session refreshes must never overwrite it.
   const fallback = `Người học ${user.id.slice(0, 6)}`;
-  const displayName = (user.name || fallback).slice(0, 80);
   await sql`
     INSERT INTO profiles(user_id,display_name,avatar_url,last_active_at,updated_at)
-    VALUES(${user.id},${displayName},${user.image || null},now(),now())
+    VALUES(${user.id},${fallback},${user.image || null},now(),now())
     ON CONFLICT(user_id) DO UPDATE SET
-      display_name=excluded.display_name,
       avatar_url=coalesce(excluded.avatar_url,profiles.avatar_url),
       last_active_at=now(),
       updated_at=now()
   `;
+}
+
+export async function getProfileDisplayName(user: { id: string; email?: string | null; name?: string | null; image?: string | null }) {
+  await ensureProfile(user);
+  const sql = db();
+  const rows = await sql`SELECT display_name FROM profiles WHERE user_id=${user.id} LIMIT 1`;
+  return rows[0]?.display_name ? String(rows[0].display_name) : `Người học ${user.id.slice(0, 6)}`;
 }
 
 export async function isAdmin(userId: string) {

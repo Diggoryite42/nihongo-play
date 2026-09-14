@@ -1,11 +1,13 @@
 import Link from 'next/link';
 import AuthControls from './AuthControls';
-import { currentUser, isAdmin } from '@/lib/auth/helpers';
+import { currentUser, getProfileDisplayName, isAdmin } from '@/lib/auth/helpers';
 
 export default async function Header({ subtitle = 'Học tiếng Nhật bằng trò chơi' }: { subtitle?: string }) {
   const user = await currentUser();
   let admin = false;
+  let displayName: string | null = null;
   if (user) {
+    try { displayName = await getProfileDisplayName(user); } catch { displayName = `Người học ${user.id.slice(0, 6)}`; }
     try { admin = await isAdmin(user.id); } catch { admin = false; }
   }
   return <header className="top">
@@ -16,7 +18,7 @@ export default async function Header({ subtitle = 'Học tiếng Nhật bằng t
     <nav className="nav">
       <Link className="btn" href="/leaderboard">BXH tuần</Link>
       {admin && <Link className="btn" href="/admin">Admin</Link>}
-      <AuthControls signedIn={Boolean(user)} />
+      <AuthControls signedIn={Boolean(user)} displayName={displayName} />
     </nav>
   </header>;
 }

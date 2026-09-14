@@ -11,7 +11,7 @@ type KanaRow = { id:number; kana_type:KanaType; kana:string; answers:string[]; g
 type Progress = { mastery:number; correct:number; wrong:number; seen:number; lastSeen:number; lastWrong:number; nextDue:number; reviewFlag:boolean; reviewStep:number; weakLevel:number; weakCorrectStreak:number };
 type Prefs = { mode:Mode; selectedGroups:string[]; sound:boolean };
 type StoredPrefs = Partial<Prefs> & { categories?:Category[]; poolSize?:number };
-type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number };
+type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number; answeredAt?:number };
 
 const GUEST_KEY='hiraloop_guest_v1';
 const PREF_KEY='nihongo_play_pref_v2';
@@ -66,6 +66,8 @@ function groupLabel(key:string,mode:Mode){
 
 function localUpdate(base:Progress,ok:boolean):Progress{
   const s=normalizeProgress(base),now=Date.now(),mins=s.lastSeen?(now-s.lastSeen)/60000:99999;
+  const wasWeak=s.weakLevel>0;
+  const reviewWasDue=!s.nextDue||s.nextDue<=now;
   const ret=mins<5?1:mins<60?1.05:mins<1440?1.15:mins<4320?1.4:mins<10080?1.6:1.8;
   const delta=ok?4*ret*Math.max(.55,1.15-s.mastery*.006):-(5+(s.lastWrong&&now-s.lastWrong<300000?1:0));
   s.mastery=Math.max(0,Math.min(100,s.mastery+delta));
@@ -80,7 +82,11 @@ function localUpdate(base:Progress,ok:boolean):Progress{
       }
     }
     if(s.reviewFlag){
-      if(s.reviewStep>=REVIEW_DELAYS.length-1){
+      // Weak-repair repetitions may happen before the spaced-review timer is due.
+      // They count toward clearing "Chưa thuộc", but must not consume the 45s→2m→… chain early.
+      if(wasWeak&&!reviewWasDue){
+        // Preserve the existing review step and due time.
+      }else if(s.reviewStep>=REVIEW_DELAYS.length-1){
         s.reviewFlag=false;
         s.reviewStep=0;
         s.nextDue=now+normalDelay(s.mastery);
@@ -105,9 +111,16 @@ function localUpdate(base:Progress,ok:boolean):Progress{
 function priority(raw:Progress){
   const s=normalizeProgress(raw),now=Date.now();
   const overdue=s.nextDue?Math.max(0,(now-s.nextDue)/60000):6;
+  if(s.weakLevel>0){
+    const remaining=Math.max(1,weakTarget(s.weakLevel)-s.weakCorrectStreak);
+    const dueBonus=s.reviewFlag&&(!s.nextDue||s.nextDue<=now)?10+Math.min(10,overdue):0;
+    // "Chưa thuộc" is an active repair queue: keep surfacing it between other cards
+    // until the required consecutive-correct streak clears the weak flag.
+    return 100+s.weakLevel*12+remaining*3+dueBonus+Math.random();
+  }
   if(s.reviewFlag){
-    if(s.nextDue&&s.nextDue>now)return -12+s.weakLevel*.5+Math.random();
-    return 28+s.weakLevel*4+Math.min(10,overdue)+Math.random()*2;
+    if(s.nextDue&&s.nextDue>now)return -12+Math.random();
+    return 28+Math.min(10,overdue)+Math.random()*2;
   }
   return (100-s.mastery)*.08+(s.seen?0:8)+Math.min(8,overdue)+Math.random()*2;
 }
@@ -138,6 +151,7 @@ export default function Trainer(){
   const questionStarted=useRef(Date.now());
   const audioRef=useRef<AudioContext|null>(null);
   const autoNextRef=useRef<number|null>(null);
+  const resettingRef=useRef(false);
 
   useEffect(()=>{
     const p=safeJson<StoredPrefs>(localStorage.getItem(PREF_KEY),{});
@@ -164,7 +178,10 @@ export default function Trainer(){
   const chooseNext=useCallback((focusInput=true)=>{
     if(autoNextRef.current!==null){window.clearTimeout(autoNextRef.current);autoNextRef.current=null}
     if(!pool.length){setCurrent(null);setAnswer('');setLocked(false);setFeedback(null);setWeakOpen(false);return}
-    const options=[...pool].sort((a,b)=>priority(progressFor(b))-priority(progressFor(a)));
+    const options=pool
+      .map(c=>({c,score:priority(progressFor(c))}))
+      .sort((a,b)=>b.score-a.score)
+      .map(x=>x.c);
     let next=options[0];
     if(current&&next?.id===current.id&&options.length>1)next=options[1];
     setCurrent(next); setAnswer(''); setLocked(false); setFeedback(null); setWeakOpen(false); setEffect(''); questionStarted.current=Date.now();
@@ -219,13 +236,16 @@ export default function Trainer(){
   },[prefs.sound]);
 
   const flushPending=useCallback(async()=>{
-    if(!userId)return;
+    if(!userId||resettingRef.current)return;
     const all=safeJson<Pending[]>(localStorage.getItem(PENDING_KEY),[]);
     const mine=all.filter(x=>x.ownerId===userId), other=all.filter(x=>x.ownerId!==userId);
     if(!mine.length)return;
     const keep:Pending[]=[];
     for(const item of mine){
-      try{const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});if(!res.ok)keep.push(item)}catch{keep.push(item)}
+      try{
+        const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});
+        if(!res.ok&&(res.status>=500||res.status===401||res.status===429))keep.push(item);
+      }catch{keep.push(item)}
     }
     localStorage.setItem(PENDING_KEY,JSON.stringify([...other,...keep].slice(-500)));
     if(!keep.length)loadCloud(); else {setOnline(false);setSyncText(`Còn ${keep.length} câu chờ sync`)}
@@ -235,11 +255,18 @@ export default function Trainer(){
 
   async function sendCloud(c:KanaRow,typed:string,responseMs:number,eventId:string,optimistic:Progress){
     if(!userId)return;
-    const item:Pending={ownerId:userId,eventId,kana:c.kana,kanaType:c.kana_type,answer:typed,responseMs};
+    const item:Pending={ownerId:userId,eventId,kana:c.kana,kanaType:c.kana_type,answer:typed,responseMs,answeredAt:Date.now()};
     try{
       const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});
-      if(!res.ok)throw new Error('sync');
+      if(!res.ok){
+        if(res.status>=400&&res.status<500&&res.status!==401&&res.status!==429){
+          setSyncText('Câu trả lời không thể đồng bộ');
+          return;
+        }
+        throw new Error('sync');
+      }
       const data=await res.json();
+      if(data.stale){await loadCloud();return}
       setRemote(prev=>({...prev,[keyFor(c)]:normalizeProgress({
         ...optimistic,
         mastery:Number(data.mastery)||optimistic.mastery,
@@ -287,11 +314,19 @@ export default function Trainer(){
 
   async function resetProgress(){
     const label=resetScope==='all'?'toàn bộ':resetScope==='hiragana'?'Hiragana':'Katakana';
-    if(!window.confirm(`Đặt lại ${label} tiến độ? Hành động này không thể hoàn tác.`))return;
+    if(!window.confirm(`Đặt lại ${label} tiến độ học? Lịch sử và điểm BXH đã ghi nhận sẽ được giữ lại.`))return;
     if(userId){
-      const res=await fetch('/api/progress/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scope:resetScope})});
-      if(!res.ok)return;
-      await loadCloud();
+      resettingRef.current=true;
+      try{
+        const res=await fetch('/api/progress/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scope:resetScope})});
+        if(!res.ok)return;
+        const pending=safeJson<Pending[]>(localStorage.getItem(PENDING_KEY),[]);
+        const filtered=pending.filter(item=>item.ownerId!==userId||(resetScope!=='all'&&item.kanaType!==resetScope));
+        localStorage.setItem(PENDING_KEY,JSON.stringify(filtered.slice(-500)));
+        await loadCloud();
+      }finally{
+        resettingRef.current=false;
+      }
     }else{
       setGuest(prev=>{
         if(resetScope==='all')return {};

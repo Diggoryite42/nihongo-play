@@ -13,6 +13,8 @@ export async function POST(request: Request) {
     const kanaType = String(body?.kanaType || '');
     const answer = String(body?.answer ?? '');
     const responseMs = Math.round(Number(body?.responseMs));
+    const answeredAtRaw = body?.answeredAt;
+    const answeredAtMs = answeredAtRaw == null ? null : Number(answeredAtRaw);
 
     if (!UUID_RE.test(eventId)) return NextResponse.json({ error: 'invalid_event_id' }, { status: 400 });
     if (!['hiragana', 'katakana'].includes(kanaType)) return NextResponse.json({ error: 'invalid_kana_type' }, { status: 400 });
@@ -21,12 +23,17 @@ export async function POST(request: Request) {
     if (!Number.isFinite(responseMs) || responseMs < 0 || responseMs > 600000) {
       return NextResponse.json({ error: 'invalid_response_ms' }, { status: 400 });
     }
+    if (answeredAtMs !== null && (!Number.isFinite(answeredAtMs) || answeredAtMs <= 0 || answeredAtMs > Date.now() + 300_000)) {
+      return NextResponse.json({ error: 'invalid_answered_at' }, { status: 400 });
+    }
 
     await ensureProfile(user);
     const sql = db();
+    const answeredAtIso = answeredAtMs === null ? null : new Date(answeredAtMs).toISOString();
     const rows = await sql`
-      SELECT nihongo_submit_answer(
-        ${user.id}, ${eventId}::uuid, ${kanaType}, ${kana}, ${answer}, ${responseMs}::integer
+      SELECT nihongo_submit_answer_hardened(
+        ${user.id}, ${eventId}::uuid, ${kanaType}, ${kana}, ${answer}, ${responseMs}::integer,
+        ${answeredAtIso}::timestamptz
       ) AS result
     `;
     return NextResponse.json(rows[0]?.result ?? { error: 'no_result' });
