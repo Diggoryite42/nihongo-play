@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requireUser } from '@/lib/auth/helpers';
+import { takeRateLimit } from '@/lib/rate-limit';
 
 export async function POST(request: Request) {
   try {
@@ -9,6 +10,14 @@ export async function POST(request: Request) {
     const scope = String(body?.scope || 'all');
     if (!['hiragana', 'katakana', 'all'].includes(scope)) {
       return NextResponse.json({ error: 'invalid_scope' }, { status: 400 });
+    }
+
+    const rate = await takeRateLimit(user.id, 'progress-reset', 6, 600);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'rate_limited', retryAfter: rate.retryAfter },
+        { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } },
+      );
     }
 
     const sql = db();
