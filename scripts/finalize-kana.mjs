@@ -28,6 +28,14 @@ const kataAdditions = additions.katakana.filter(row => !has(row.kana_type, row.k
 if (hiraAdditions.length) rows.splice(firstKatakana < 0 ? rows.length : firstKatakana, 0, ...hiraAdditions);
 rows.push(...kataAdditions);
 
+// The 2025 Japanese government standard romanizes を/ヲ as "o".
+// Keep "wo" accepted for kana-learning/IME habits, but display the current standard first.
+for (const row of rows) {
+  if (row.kana === 'を' || row.kana === 'ヲ') {
+    row.answers = ['o', ...row.answers.filter(answer => answer !== 'o')];
+  }
+}
+
 function stableClientId(row) {
   const key = `${row.kana_type}:${row.kana}`;
   return createHash('sha256').update(key, 'utf8').digest().readUInt32BE(0);
