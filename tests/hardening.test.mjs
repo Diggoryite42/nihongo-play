@@ -20,8 +20,9 @@ test('application build never mutates the database',()=>{
   assert.match(migrate,/db', 'migrations/);
 });
 
-test('runtime and patched React line are pinned',()=>{
+test('runtime and patched framework lines are pinned',()=>{
   assert.equal(pkg.engines.node,'24.x');
+  assert.equal(pkg.dependencies.next,'16.3.5');
   assert.equal(pkg.dependencies.react,'19.2.8');
   assert.equal(pkg.dependencies['react-dom'],'19.2.8');
 });
