@@ -42,6 +42,16 @@ test('trainer scores candidates once before sorting',()=>{
   assert.doesNotMatch(trainer,/sort\(\(a,b\)=>priority\(progressFor\(b\)\)-priority\(progressFor\(a\)\)\)/);
 });
 
+test('weak kana stay in an active repair queue until the streak clears',()=>{
+  assert.match(trainer,/if\(s\.weakLevel>0\)\{[\s\S]*return 100\+s\.weakLevel\*12/);
+  assert.match(trainer,/const wasWeak=s\.weakLevel>0/);
+  assert.match(trainer,/const reviewWasDue=!s\.nextDue\|\|s\.nextDue<=now/);
+  assert.match(trainer,/if\(wasWeak&&!reviewWasDue\)/);
+  assert.match(migration,/v_weak_level_before > 0/);
+  assert.match(migration,/v_next_review_before > clock_timestamp\(\)/);
+  assert.match(migration,/next_review_at = v_next_review_before/);
+});
+
 test('reset removes matching queued answers from local storage',()=>{
   assert.match(trainer,/item\.ownerId!==userId\|\|\(resetScope!=='all'&&item\.kanaType!==resetScope\)/);
   assert.match(trainer,/answeredAt:Date\.now\(\)/);
