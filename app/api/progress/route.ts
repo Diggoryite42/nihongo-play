@@ -11,7 +11,8 @@ export async function GET() {
       SELECT c.kana_type, c.kana,
              p.total_attempts, p.correct_attempts, p.wrong_attempts,
              p.mastery_score, p.current_streak, p.best_streak,
-             p.last_seen_at, p.last_wrong_at, p.next_review_at
+             p.last_seen_at, p.last_wrong_at, p.next_review_at,
+             p.review_flag, p.review_step, p.weak_level, p.weak_correct_streak
       FROM kana_progress p
       JOIN kana_catalog c ON c.id=p.kana_id
       WHERE p.user_id=${user.id}
