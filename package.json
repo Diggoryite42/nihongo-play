@@ -8,7 +8,7 @@
   "scripts": {
     "kana": "node scripts/generate-kana.mjs && node scripts/finalize-kana.mjs",
     "dev": "npm run kana && next dev",
-    "build": "npm run kana && node --test tests/*.test.mjs && next build",
+    "build": "npm run kana && node --test tests/*.test.mjs && node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});fs.copyFileSync('package-lock.json','public/__package-lock.json')\" && next build",
     "migrate": "npm run kana && node scripts/migrate.mjs",
     "start": "next start",
     "typecheck": "tsc --noEmit",
