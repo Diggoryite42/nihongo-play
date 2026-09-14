@@ -38,9 +38,18 @@ CREATE TABLE IF NOT EXISTS kana_progress (
   last_correct_at timestamptz,
   last_wrong_at timestamptz,
   next_review_at timestamptz,
+  review_flag boolean NOT NULL DEFAULT false,
+  review_step smallint NOT NULL DEFAULT 0 CHECK (review_step BETWEEN 0 AND 5),
+  weak_level smallint NOT NULL DEFAULT 0 CHECK (weak_level BETWEEN 0 AND 3),
+  weak_correct_streak smallint NOT NULL DEFAULT 0 CHECK (weak_correct_streak BETWEEN 0 AND 5),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, kana_id)
 );
+
+ALTER TABLE kana_progress ADD COLUMN IF NOT EXISTS review_flag boolean NOT NULL DEFAULT false;
+ALTER TABLE kana_progress ADD COLUMN IF NOT EXISTS review_step smallint NOT NULL DEFAULT 0 CHECK (review_step BETWEEN 0 AND 5);
+ALTER TABLE kana_progress ADD COLUMN IF NOT EXISTS weak_level smallint NOT NULL DEFAULT 0 CHECK (weak_level BETWEEN 0 AND 3);
+ALTER TABLE kana_progress ADD COLUMN IF NOT EXISTS weak_correct_streak smallint NOT NULL DEFAULT 0 CHECK (weak_correct_streak BETWEEN 0 AND 5);
 
 CREATE TABLE IF NOT EXISTS learning_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,6 +172,12 @@ DECLARE
   v_best integer := 0;
   v_last_seen timestamptz;
   v_last_wrong timestamptz;
+  v_review_flag boolean := false;
+  v_review_step integer := 0;
+  v_weak_level integer := 0;
+  v_weak_streak integer := 0;
+  v_weak_target integer := 0;
+  v_next_review timestamptz;
   v_mastery_after numeric;
   v_retention numeric := 1;
   v_difficulty numeric := 1;
@@ -219,8 +234,10 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id || ':' || v_kana_id::text, 0));
 
   SELECT total_attempts, correct_attempts, wrong_attempts, mastery_score,
-         current_streak, best_streak, last_seen_at, last_wrong_at
-  INTO v_total, v_correct, v_wrong, v_mastery, v_streak, v_best, v_last_seen, v_last_wrong
+         current_streak, best_streak, last_seen_at, last_wrong_at,
+         review_flag, review_step, weak_level, weak_correct_streak
+  INTO v_total, v_correct, v_wrong, v_mastery, v_streak, v_best, v_last_seen, v_last_wrong,
+       v_review_flag, v_review_step, v_weak_level, v_weak_streak
   FROM kana_progress
   WHERE user_id = p_user_id AND kana_id = v_kana_id
   FOR UPDATE;
@@ -228,6 +245,7 @@ BEGIN
   IF NOT FOUND THEN
     v_total := 0; v_correct := 0; v_wrong := 0; v_mastery := 0;
     v_streak := 0; v_best := 0; v_last_seen := NULL; v_last_wrong := NULL;
+    v_review_flag := false; v_review_step := 0; v_weak_level := 0; v_weak_streak := 0;
   END IF;
 
   SELECT max(created_at) INTO v_last_event
@@ -271,9 +289,51 @@ BEGIN
     END IF;
     v_streak := v_streak + 1;
     v_best := greatest(v_best, v_streak);
+
+    IF v_weak_level > 0 THEN
+      v_weak_streak := v_weak_streak + 1;
+      v_weak_target := CASE v_weak_level WHEN 1 THEN 3 WHEN 2 THEN 4 ELSE 5 END;
+      IF v_weak_streak >= v_weak_target THEN
+        v_weak_level := 0;
+        v_weak_streak := 0;
+      END IF;
+    END IF;
+
+    IF v_review_flag THEN
+      IF v_review_step >= 5 THEN
+        v_review_flag := false;
+        v_review_step := 0;
+        v_next_review := v_now + CASE WHEN v_mastery_after < 25 THEN interval '2 minutes'
+                                      WHEN v_mastery_after < 45 THEN interval '10 minutes'
+                                      WHEN v_mastery_after < 65 THEN interval '1 hour'
+                                      WHEN v_mastery_after < 80 THEN interval '12 hours'
+                                      WHEN v_mastery_after < 92 THEN interval '2 days'
+                                      ELSE interval '5 days' END;
+      ELSE
+        v_review_step := v_review_step + 1;
+        v_next_review := v_now + CASE v_review_step
+                                   WHEN 1 THEN interval '2 minutes'
+                                   WHEN 2 THEN interval '5 minutes'
+                                   WHEN 3 THEN interval '15 minutes'
+                                   WHEN 4 THEN interval '1 hour'
+                                   ELSE interval '1 day' END;
+      END IF;
+    ELSE
+      v_next_review := v_now + CASE WHEN v_mastery_after < 25 THEN interval '2 minutes'
+                                    WHEN v_mastery_after < 45 THEN interval '10 minutes'
+                                    WHEN v_mastery_after < 65 THEN interval '1 hour'
+                                    WHEN v_mastery_after < 80 THEN interval '12 hours'
+                                    WHEN v_mastery_after < 92 THEN interval '2 days'
+                                    ELSE interval '5 days' END;
+    END IF;
   ELSE
     v_mastery_after := greatest(0, v_mastery - (5 + CASE WHEN v_last_wrong IS NOT NULL AND v_now - v_last_wrong < interval '5 minutes' THEN 1 ELSE 0 END));
     v_streak := 0;
+    v_review_flag := true;
+    v_review_step := 0;
+    v_weak_level := least(3, v_weak_level + 1);
+    v_weak_streak := 0;
+    v_next_review := v_now + interval '45 seconds';
   END IF;
 
   INSERT INTO answer_events(event_id,user_id,kana_id,kana_type,kana,answer_text,is_correct,response_ms,
@@ -282,18 +342,12 @@ BEGIN
          v_meaningful,v_mastery,v_mastery_after,v_progress,v_recovery,v_now);
 
   INSERT INTO kana_progress(user_id,kana_id,total_attempts,correct_attempts,wrong_attempts,mastery_score,
-                            current_streak,best_streak,last_seen_at,last_correct_at,last_wrong_at,next_review_at,updated_at)
+                            current_streak,best_streak,last_seen_at,last_correct_at,last_wrong_at,next_review_at,
+                            review_flag,review_step,weak_level,weak_correct_streak,updated_at)
   VALUES(
     p_user_id,v_kana_id,1,CASE WHEN v_is_correct THEN 1 ELSE 0 END,CASE WHEN v_is_correct THEN 0 ELSE 1 END,
     v_mastery_after,v_streak,v_best,v_now,CASE WHEN v_is_correct THEN v_now END,CASE WHEN NOT v_is_correct THEN v_now END,
-    v_now + CASE WHEN NOT v_is_correct THEN interval '45 seconds'
-                 WHEN v_mastery_after < 25 THEN interval '2 minutes'
-                 WHEN v_mastery_after < 45 THEN interval '10 minutes'
-                 WHEN v_mastery_after < 65 THEN interval '1 hour'
-                 WHEN v_mastery_after < 80 THEN interval '12 hours'
-                 WHEN v_mastery_after < 92 THEN interval '2 days'
-                 ELSE interval '5 days' END,
-    v_now
+    v_next_review,v_review_flag,v_review_step,v_weak_level,v_weak_streak,v_now
   )
   ON CONFLICT(user_id,kana_id) DO UPDATE SET
     total_attempts = kana_progress.total_attempts + 1,
@@ -305,13 +359,11 @@ BEGIN
     last_seen_at = v_now,
     last_correct_at = CASE WHEN v_is_correct THEN v_now ELSE kana_progress.last_correct_at END,
     last_wrong_at = CASE WHEN NOT v_is_correct THEN v_now ELSE kana_progress.last_wrong_at END,
-    next_review_at = v_now + CASE WHEN NOT v_is_correct THEN interval '45 seconds'
-                                  WHEN v_mastery_after < 25 THEN interval '2 minutes'
-                                  WHEN v_mastery_after < 45 THEN interval '10 minutes'
-                                  WHEN v_mastery_after < 65 THEN interval '1 hour'
-                                  WHEN v_mastery_after < 80 THEN interval '12 hours'
-                                  WHEN v_mastery_after < 92 THEN interval '2 days'
-                                  ELSE interval '5 days' END,
+    next_review_at = v_next_review,
+    review_flag = v_review_flag,
+    review_step = v_review_step,
+    weak_level = v_weak_level,
+    weak_correct_streak = v_weak_streak,
     updated_at = v_now;
 
   IF p_response_ms < 250 THEN
@@ -355,6 +407,11 @@ BEGIN
     'wrongAttempts', v_wrong + CASE WHEN v_is_correct THEN 0 ELSE 1 END,
     'currentStreak', v_streak,
     'bestStreak', v_best,
+    'reviewFlag', v_review_flag,
+    'reviewStep', v_review_step,
+    'weakLevel', v_weak_level,
+    'weakCorrectStreak', v_weak_streak,
+    'nextReviewAt', v_next_review,
     'progressDelta', round(v_progress,4),
     'recoveryDelta', round(v_recovery,4),
     'meaningfulWeight', v_meaningful,
