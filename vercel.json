@@ -1,5 +1,5 @@
 {
   "framework": "nextjs",
   "installCommand": "npm ci",
-  "buildCommand": "npm audit --json || true; npm run build"
+  "buildCommand": "echo '=== NPM_AUDIT_BEGIN ==='; npm audit --json || true; echo '=== NPM_AUDIT_END ==='; npm run build"
 }
