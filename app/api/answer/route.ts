@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     const sql = db();
     const answeredAtIso = answeredAtMs === null ? null : new Date(answeredAtMs).toISOString();
     const rows = await sql`
-      SELECT nihongo_submit_answer(
+      SELECT nihongo_submit_answer_hardened(
         ${user.id}, ${eventId}::uuid, ${kanaType}, ${kana}, ${answer}, ${responseMs}::integer,
         ${answeredAtIso}::timestamptz
       ) AS result
