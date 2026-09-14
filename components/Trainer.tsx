@@ -8,7 +8,7 @@ type KanaType = 'hiragana' | 'katakana';
 type Category = 'main' | 'dakuten' | 'combo';
 type Mode = KanaType | 'mixed';
 type KanaRow = { id:number; kana_type:KanaType; kana:string; answers:string[]; group_key:string; category:Category };
-type Progress = { mastery:number; correct:number; wrong:number; seen:number; lastSeen:number; lastWrong:number; nextDue:number };
+type Progress = { mastery:number; correct:number; wrong:number; seen:number; lastSeen:number; lastWrong:number; nextDue:number; reviewFlag:boolean; reviewStep:number; weakLevel:number; weakCorrectStreak:number };
 type Prefs = { mode:Mode; selectedGroups:string[]; sound:boolean };
 type StoredPrefs = Partial<Prefs> & { categories?:Category[]; poolSize?:number };
 type Pending = { ownerId:string; eventId:string; kana:string; kanaType:KanaType; answer:string; responseMs:number };
@@ -17,6 +17,7 @@ const GUEST_KEY='hiraloop_guest_v1';
 const PREF_KEY='nihongo_play_pref_v2';
 const PENDING_KEY='nihongo_play_pending_v2';
 const KANA=kanaRows as KanaRow[];
+const REVIEW_DELAYS=[45000,120000,300000,900000,3600000,86400000] as const;
 const ALL_GROUP_KEYS=Array.from(new Set(KANA.map(c=>c.group_key)));
 const GROUPS_BY_CATEGORY:Record<Category,string[]>={
   main:ALL_GROUP_KEYS.filter(k=>k.startsWith('main-')),
@@ -32,8 +33,27 @@ const CATEGORY_META:Record<Category,{title:string;sub:string;icon:string}>={
 
 function normalize(v:string){return(v||'').trim().toLowerCase().replace(/\s+/g,'')}
 function keyFor(c:KanaRow){return `${c.kana_type}:${c.kana}`}
-function blankProgress():Progress{return {mastery:0,correct:0,wrong:0,seen:0,lastSeen:0,lastWrong:0,nextDue:0}}
+function blankProgress():Progress{return {mastery:0,correct:0,wrong:0,seen:0,lastSeen:0,lastWrong:0,nextDue:0,reviewFlag:false,reviewStep:0,weakLevel:0,weakCorrectStreak:0}}
+function normalizeProgress(raw?:Partial<Progress>):Progress{
+  const b=blankProgress();
+  if(!raw)return b;
+  return {
+    mastery:Number(raw.mastery)||0,
+    correct:Number(raw.correct)||0,
+    wrong:Number(raw.wrong)||0,
+    seen:Number(raw.seen)||0,
+    lastSeen:Number(raw.lastSeen)||0,
+    lastWrong:Number(raw.lastWrong)||0,
+    nextDue:Number(raw.nextDue)||0,
+    reviewFlag:Boolean(raw.reviewFlag),
+    reviewStep:Math.max(0,Math.min(5,Number(raw.reviewStep)||0)),
+    weakLevel:Math.max(0,Math.min(3,Number(raw.weakLevel)||0)),
+    weakCorrectStreak:Math.max(0,Number(raw.weakCorrectStreak)||0),
+  };
+}
 function safeJson<T>(raw:string|null,fallback:T):T{try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
+function weakTarget(level:number){return level===1?3:level===2?4:level===3?5:0}
+function normalDelay(mastery:number){return mastery<25?120000:mastery<45?600000:mastery<65?3600000:mastery<80?43200000:mastery<92?172800000:432000000}
 function groupLabel(key:string,mode:Mode){
   const rows=KANA.filter(c=>c.group_key===key);
   const hira=rows.find(c=>c.kana_type==='hiragana');
@@ -45,19 +65,51 @@ function groupLabel(key:string,mode:Mode){
 }
 
 function localUpdate(base:Progress,ok:boolean):Progress{
-  const s={...base},now=Date.now(),mins=s.lastSeen?(now-s.lastSeen)/60000:99999;
+  const s=normalizeProgress(base),now=Date.now(),mins=s.lastSeen?(now-s.lastSeen)/60000:99999;
   const ret=mins<5?1:mins<60?1.05:mins<1440?1.15:mins<4320?1.4:mins<10080?1.6:1.8;
   const delta=ok?4*ret*Math.max(.55,1.15-s.mastery*.006):-(5+(s.lastWrong&&now-s.lastWrong<300000?1:0));
   s.mastery=Math.max(0,Math.min(100,s.mastery+delta));
   s.correct+=(ok?1:0); s.wrong+=(ok?0:1); s.seen+=1; s.lastSeen=now;
-  if(!ok)s.lastWrong=now;
-  s.nextDue=now+(ok?(s.mastery<25?120000:s.mastery<45?600000:s.mastery<65?3600000:s.mastery<80?43200000:s.mastery<92?172800000:432000000):45000);
+
+  if(ok){
+    if(s.weakLevel>0){
+      s.weakCorrectStreak+=1;
+      if(s.weakCorrectStreak>=weakTarget(s.weakLevel)){
+        s.weakLevel=0;
+        s.weakCorrectStreak=0;
+      }
+    }
+    if(s.reviewFlag){
+      if(s.reviewStep>=REVIEW_DELAYS.length-1){
+        s.reviewFlag=false;
+        s.reviewStep=0;
+        s.nextDue=now+normalDelay(s.mastery);
+      }else{
+        s.reviewStep+=1;
+        s.nextDue=now+REVIEW_DELAYS[s.reviewStep];
+      }
+    }else{
+      s.nextDue=now+normalDelay(s.mastery);
+    }
+  }else{
+    s.lastWrong=now;
+    s.reviewFlag=true;
+    s.reviewStep=0;
+    s.weakLevel=Math.min(3,s.weakLevel+1);
+    s.weakCorrectStreak=0;
+    s.nextDue=now+REVIEW_DELAYS[0];
+  }
   return s;
 }
 
-function priority(s:Progress){
-  const now=Date.now(); const overdue=s.nextDue?Math.max(0,(now-s.nextDue)/60000):6;
-  return (100-s.mastery)*.08+s.wrong*1.8+(s.seen?0:8)+Math.min(8,overdue)+Math.random()*2;
+function priority(raw:Progress){
+  const s=normalizeProgress(raw),now=Date.now();
+  const overdue=s.nextDue?Math.max(0,(now-s.nextDue)/60000):6;
+  if(s.reviewFlag){
+    if(s.nextDue&&s.nextDue>now)return -12+s.weakLevel*.5+Math.random();
+    return 28+s.weakLevel*4+Math.min(10,overdue)+Math.random()*2;
+  }
+  return (100-s.mastery)*.08+(s.seen?0:8)+Math.min(8,overdue)+Math.random()*2;
 }
 
 function uuid(){
@@ -95,14 +147,15 @@ export default function Trainer(){
       ? p.selectedGroups.filter(k=>ALL_GROUP_KEYS.includes(k))
       : migratedGroups;
     setPrefs({mode:p.mode||DEFAULT_PREFS.mode,selectedGroups:selectedGroups.length?selectedGroups:[...GROUPS_BY_CATEGORY.main],sound:p.sound??true});
-    setGuest(safeJson<Record<string,Progress>>(localStorage.getItem(GUEST_KEY),{}));
+    const storedGuest=safeJson<Record<string,Progress>>(localStorage.getItem(GUEST_KEY),{});
+    setGuest(Object.fromEntries(Object.entries(storedGuest).map(([k,v])=>[k,normalizeProgress(v)])));
     setHydrated(true);
   },[]);
 
   useEffect(()=>{if(hydrated)localStorage.setItem(PREF_KEY,JSON.stringify(prefs))},[prefs,hydrated]);
   useEffect(()=>{if(hydrated&&!userId)localStorage.setItem(GUEST_KEY,JSON.stringify(guest))},[guest,hydrated,userId]);
 
-  const progressFor=useCallback((c:KanaRow)=>((userId?remote:guest)[keyFor(c)]||blankProgress()),[userId,remote,guest]);
+  const progressFor=useCallback((c:KanaRow)=>normalizeProgress((userId?remote:guest)[keyFor(c)]),[userId,remote,guest]);
   const pool=useMemo(()=>{
     const rows=KANA.filter(c=>(prefs.mode==='mixed'||c.kana_type===prefs.mode)&&prefs.selectedGroups.includes(c.group_key));
     return rows.sort((a,b)=>a.category.localeCompare(b.category)||a.group_key.localeCompare(b.group_key)||a.id-b.id);
@@ -126,7 +179,21 @@ export default function Trainer(){
       const [p,r]=await Promise.all([fetch('/api/progress',{cache:'no-store'}),fetch('/api/me/rank',{cache:'no-store'})]);
       if(!p.ok)throw new Error('progress');
       const payload=await p.json(); const map:Record<string,Progress>={};
-      for(const row of payload.progress||[]){map[`${row.kana_type}:${row.kana}`]={mastery:Number(row.mastery_score)||0,correct:Number(row.correct_attempts)||0,wrong:Number(row.wrong_attempts)||0,seen:Number(row.total_attempts)||0,lastSeen:row.last_seen_at?Date.parse(row.last_seen_at):0,lastWrong:row.last_wrong_at?Date.parse(row.last_wrong_at):0,nextDue:row.next_review_at?Date.parse(row.next_review_at):0}}
+      for(const row of payload.progress||[]){
+        map[`${row.kana_type}:${row.kana}`]=normalizeProgress({
+          mastery:Number(row.mastery_score)||0,
+          correct:Number(row.correct_attempts)||0,
+          wrong:Number(row.wrong_attempts)||0,
+          seen:Number(row.total_attempts)||0,
+          lastSeen:row.last_seen_at?Date.parse(row.last_seen_at):0,
+          lastWrong:row.last_wrong_at?Date.parse(row.last_wrong_at):0,
+          nextDue:row.next_review_at?Date.parse(row.next_review_at):0,
+          reviewFlag:Boolean(row.review_flag),
+          reviewStep:Number(row.review_step)||0,
+          weakLevel:Number(row.weak_level)||0,
+          weakCorrectStreak:Number(row.weak_correct_streak)||0,
+        });
+      }
       setRemote(map); setOnline(true); setSyncText('Đã đồng bộ tài khoản');
       if(r.ok){const rr=await r.json();setRank(rr.score?`${Math.round(Number(rr.score.ranking_score))} pts`:'0 pts')}
     }catch{setOnline(false);setSyncText('Cloud tạm thời không kết nối')}
@@ -173,7 +240,18 @@ export default function Trainer(){
       const res=await fetch('/api/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(item)});
       if(!res.ok)throw new Error('sync');
       const data=await res.json();
-      setRemote(prev=>({...prev,[keyFor(c)]:{...optimistic,mastery:Number(data.mastery)||optimistic.mastery,correct:Number.isFinite(Number(data.correctAttempts))?Number(data.correctAttempts):optimistic.correct,wrong:Number.isFinite(Number(data.wrongAttempts))?Number(data.wrongAttempts):optimistic.wrong,seen:Number.isFinite(Number(data.totalAttempts))?Number(data.totalAttempts):optimistic.seen}}));
+      setRemote(prev=>({...prev,[keyFor(c)]:normalizeProgress({
+        ...optimistic,
+        mastery:Number(data.mastery)||optimistic.mastery,
+        correct:Number.isFinite(Number(data.correctAttempts))?Number(data.correctAttempts):optimistic.correct,
+        wrong:Number.isFinite(Number(data.wrongAttempts))?Number(data.wrongAttempts):optimistic.wrong,
+        seen:Number.isFinite(Number(data.totalAttempts))?Number(data.totalAttempts):optimistic.seen,
+        nextDue:data.nextReviewAt?Date.parse(data.nextReviewAt):optimistic.nextDue,
+        reviewFlag:typeof data.reviewFlag==='boolean'?data.reviewFlag:optimistic.reviewFlag,
+        reviewStep:Number.isFinite(Number(data.reviewStep))?Number(data.reviewStep):optimistic.reviewStep,
+        weakLevel:Number.isFinite(Number(data.weakLevel))?Number(data.weakLevel):optimistic.weakLevel,
+        weakCorrectStreak:Number.isFinite(Number(data.weakCorrectStreak))?Number(data.weakCorrectStreak):optimistic.weakCorrectStreak,
+      })}));
       setOnline(true);setSyncText('Đã đồng bộ tài khoản');
       if(Number.isFinite(Number(data.rankingScore)))setRank(`${Math.round(Number(data.rankingScore))} pts`);
     }catch{
@@ -194,7 +272,11 @@ export default function Trainer(){
     if(userId)setRemote(prev=>({...prev,[keyFor(current)]:updated}));
     else setGuest(prev=>({...prev,[keyFor(current)]:updated}));
     setLocked(true);setStats(s=>({correct:s.correct+(ok?1:0),wrong:s.wrong+(ok?0:1),streak:ok?s.streak+1:0}));
-    setFeedback({ok,text:ok?`Đúng — ${current.answers[0]}`:`Sai — đáp án đúng: ${current.answers[0]}`});
+    let stateText='';
+    if(!ok)stateText=` • Cần ôn • Chưa thuộc Lv${updated.weakLevel}`;
+    else if(base.weakLevel>0&&updated.weakLevel===0)stateText=' • Đã gỡ Chưa thuộc';
+    else if(updated.weakLevel>0)stateText=` • Lv${updated.weakLevel}: ${updated.weakCorrectStreak}/${weakTarget(updated.weakLevel)} đúng liên tiếp`;
+    setFeedback({ok,text:ok?`Đúng — ${current.answers[0]}${stateText}`:`Sai — đáp án đúng: ${current.answers[0]}${stateText}`});
     setEffect(ok?'pop':'shake flash-bad'); sound(ok);
     if(!ok&&navigator.vibrate)navigator.vibrate([90,45,120]);
     const responseMs=Math.min(600000,Date.now()-questionStarted.current);
@@ -239,7 +321,7 @@ export default function Trainer(){
   }
 
   const n=stats.correct+stats.wrong; const accuracy=n?Math.round(stats.correct/n*100)+'%':'—';
-  const weak=pool.map(c=>({c,s:progressFor(c)})).filter(x=>x.s.seen&&(!current||locked||x.c.id!==current.id)).sort((a,b)=>a.s.mastery-b.s.mastery||b.s.wrong-a.s.wrong).slice(0,8);
+  const weak=pool.map(c=>({c,s:progressFor(c)})).filter(x=>x.s.seen&&(!current||locked||x.c.id!==current.id)).sort((a,b)=>b.s.weakLevel-a.s.weakLevel||Number(b.s.reviewFlag)-Number(a.s.reviewFlag)||a.s.mastery-b.s.mastery||b.s.wrong-a.s.wrong).slice(0,8);
 
   return <>
     <section className="card modebar" aria-label="Bảng chữ">
@@ -278,7 +360,7 @@ export default function Trainer(){
       </section>
       <aside className="side">
         <section className="card"><h2>Phiên học</h2><div className="stats"><div className="stat"><b>{stats.correct}</b><span>Đúng</span></div><div className="stat"><b>{stats.wrong}</b><span>Sai</span></div><div className="stat"><b>{accuracy}</b><span>Độ chính xác</span></div><div className="stat"><b>{stats.streak}</b><span>Chuỗi đúng</span></div></div></section>
-        <section className="card"><div className="weak-head"><h2>Chữ cần ôn nhiều</h2><button className="btn" onClick={()=>setWeakOpen(x=>!x)}>{weakOpen?'Ẩn':'Hiện'}</button></div>{!weakOpen?<div className="hidden-note">Nội dung đang được ẩn để tránh lộ đáp án.</div>:<div className="weak-list">{weak.length?weak.map(({c,s})=><div className="weak" key={c.id}><strong>{c.kana}</strong><small>{Math.round(s.mastery)}%</small></div>):<div className="hidden-note">Chưa đủ dữ liệu.</div>}</div>}</section>
+        <section className="card"><div className="weak-head"><h2>Chữ cần ôn nhiều</h2><button className="btn" onClick={()=>setWeakOpen(x=>!x)}>{weakOpen?'Ẩn':'Hiện'}</button></div>{!weakOpen?<div className="hidden-note">Nội dung đang được ẩn để tránh lộ đáp án.</div>:<div className="weak-list">{weak.length?weak.map(({c,s})=><div className="weak" key={c.id}><strong>{c.kana}</strong><small>{s.weakLevel>0?`Chưa thuộc Lv${s.weakLevel} · ${s.weakCorrectStreak}/${weakTarget(s.weakLevel)} đúng${s.reviewFlag?' · Cần ôn':''}`:s.reviewFlag?'Cần ôn':`${Math.round(s.mastery)}%`}</small></div>):<div className="hidden-note">Chưa đủ dữ liệu.</div>}</div>}</section>
         <section className="card"><h2>Cài đặt</h2><div className="settings"><div className="selection-summary"><span>Bộ đang học</span><strong>{pool.length} kana • {prefs.selectedGroups.length}/{ALL_GROUP_KEYS.length} nhóm</strong></div><button className="btn" onClick={()=>{setPrefs(p=>({...p,sound:!p.sound}));if(!prefs.sound)setTimeout(()=>sound(true),0)}}>Âm thanh: {prefs.sound?'Bật':'Tắt'}</button><div><label>Đặt lại tiến độ</label><div className="reset-row"><select value={resetScope} onChange={e=>setResetScope(e.target.value as 'hiragana'|'katakana'|'all')}><option value="hiragana">Hiragana</option><option value="katakana">Katakana</option><option value="all">Tất cả</option></select><button className="btn danger" onClick={resetProgress}>Đặt lại</button></div></div></div></section>
         <section className="card rank-card"><div><div className="eyebrow">Điểm tuần</div><div className="rank-big">{rank}</div></div><a className="btn" href="/leaderboard">Xem BXH</a></section>
       </aside>
