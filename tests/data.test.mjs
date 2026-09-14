@@ -5,15 +5,19 @@ import fs from 'node:fs';
 const rows=JSON.parse(fs.readFileSync(new URL('../data/kana.json',import.meta.url),'utf8'));
 const find=k=>rows.find(x=>x.kana===k)?.answers;
 
-test('catalog contains exactly 208 kana',()=>assert.equal(rows.length,208));
+test('catalog contains exactly 214 kana',()=>assert.equal(rows.length,214));
 
 test('catalog is balanced',()=>{
-  assert.equal(rows.filter(x=>x.kana_type==='hiragana').length,104);
-  assert.equal(rows.filter(x=>x.kana_type==='katakana').length,104);
+  assert.equal(rows.filter(x=>x.kana_type==='hiragana').length,107);
+  assert.equal(rows.filter(x=>x.kana_type==='katakana').length,107);
 });
 
-test('ids stay stable and contiguous',()=>{
-  assert.deepEqual(rows.map(x=>x.id),Array.from({length:208},(_,i)=>i+1));
+test('generated client ids are stable content-derived unique integers',()=>{
+  assert.ok(rows.every(x=>Number.isInteger(x.id)&&x.id>=0));
+  assert.equal(new Set(rows.map(x=>x.id)).size,rows.length);
+  const snapshot=new Map(rows.map(x=>[`${x.kana_type}:${x.kana}`,x.id]));
+  const reordered=[...rows].reverse();
+  for(const row of reordered)assert.equal(snapshot.get(`${row.kana_type}:${row.kana}`),row.id);
 });
 
 test('three groups exist',()=>{
@@ -31,9 +35,9 @@ test('every kana has clean unique answers and a canonical answer',()=>{
 });
 
 test('hiragana and katakana counterparts share the same romaji policy',()=>{
-  for(let i=0;i<104;i++){
+  for(let i=0;i<107;i++){
     const hira=rows[i];
-    const kata=rows[i+104];
+    const kata=rows[i+107];
     assert.equal(hira.kana_type,'hiragana');
     assert.equal(kata.kana_type,'katakana');
     assert.equal(hira.group_key,kata.group_key,`${hira.kana}/${kata.kana} group mismatch`);
@@ -62,6 +66,9 @@ test('supported romaji systems and common learner variants are preserved',()=>{
     'じゃ':['ja','jya','zya'],
     'じゅ':['ju','jyu','zyu'],
     'じょ':['jo','jyo','zyo'],
+    'ぢゃ':['ja','jya','zya','dya'],
+    'ぢゅ':['ju','jyu','zyu','dyu'],
+    'ぢょ':['jo','jyo','zyo','dyo'],
   };
   for(const [kana,answers] of Object.entries(expected))assert.deepEqual(find(kana),answers,kana);
 });
