@@ -51,6 +51,10 @@ DECLARE
   v_allowed_progress numeric := 0;
   v_allowed_recovery numeric := 0;
   v_rank numeric := 0;
+  v_review_flag_before boolean := false;
+  v_review_step_before integer := 0;
+  v_next_review_before timestamptz;
+  v_weak_level_before integer := 0;
 BEGIN
   IF p_user_id IS NULL OR length(p_user_id) = 0 THEN
     RAISE EXCEPTION 'missing_user';
@@ -80,10 +84,14 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id || ':' || v_kana_id::text, 0));
   v_period := date_trunc('week', clock_timestamp() AT TIME ZONE 'UTC')::date;
 
-  SELECT mastery_score INTO v_mastery_before
+  SELECT mastery_score, review_flag, review_step, next_review_at, weak_level
+  INTO v_mastery_before, v_review_flag_before, v_review_step_before, v_next_review_before, v_weak_level_before
   FROM kana_progress
   WHERE user_id = p_user_id AND kana_id = v_kana_id;
   v_mastery_before := coalesce(v_mastery_before, 0);
+  v_review_flag_before := coalesce(v_review_flag_before, false);
+  v_review_step_before := coalesce(v_review_step_before, 0);
+  v_weak_level_before := coalesce(v_weak_level_before, 0);
 
   INSERT INTO leaderboard_kana_credit(user_id, period_start, kana_id, high_water_mastery, updated_at)
   VALUES(p_user_id, v_period, v_kana_id, v_mastery_before, now())
@@ -111,6 +119,28 @@ BEGIN
 
   IF NOT FOUND THEN
     RETURN v_result;
+  END IF;
+
+  -- "Chưa thuộc" is a short repair drill and may intentionally surface before
+  -- the spaced-review timer is due. An early correct answer may advance the
+  -- weak streak, but it must not consume the 45s → 2m → 5m → ... review chain.
+  IF v_event.is_correct
+     AND v_weak_level_before > 0
+     AND v_review_flag_before
+     AND v_next_review_before IS NOT NULL
+     AND v_next_review_before > clock_timestamp() THEN
+    UPDATE kana_progress
+    SET review_flag = v_review_flag_before,
+        review_step = v_review_step_before,
+        next_review_at = v_next_review_before,
+        updated_at = now()
+    WHERE user_id = p_user_id AND kana_id = v_kana_id;
+
+    v_result := v_result || jsonb_build_object(
+      'reviewFlag', v_review_flag_before,
+      'reviewStep', v_review_step_before,
+      'nextReviewAt', v_next_review_before
+    );
   END IF;
 
   IF v_event.mastery_before < 40 THEN v_difficulty := 0.8;
