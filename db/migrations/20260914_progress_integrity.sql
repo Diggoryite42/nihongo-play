@@ -23,14 +23,9 @@ CREATE TABLE IF NOT EXISTS progress_reset_markers (
 ALTER TABLE answer_events
   ADD COLUMN IF NOT EXISTS client_answered_at timestamptz;
 
--- schema.sql recreates the six-argument implementation before this migration runs.
--- Preserve that implementation under an internal name, then put hardened wrappers in front of it.
-DROP FUNCTION IF EXISTS nihongo_submit_answer(text, uuid, text, text, text, integer, timestamptz);
-DROP FUNCTION IF EXISTS nihongo_submit_answer_legacy_impl(text, uuid, text, text, text, integer);
-ALTER FUNCTION nihongo_submit_answer(text, uuid, text, text, text, integer)
-  RENAME TO nihongo_submit_answer_legacy_impl;
-
-CREATE OR REPLACE FUNCTION nihongo_submit_answer(
+-- The existing six-argument nihongo_submit_answer remains the learning-state implementation.
+-- The app calls this hardened entry point, which atomically clamps competitive credit afterwards.
+CREATE OR REPLACE FUNCTION nihongo_submit_answer_hardened(
   p_user_id text,
   p_event_id uuid,
   p_kana_type text,
@@ -81,7 +76,7 @@ BEGIN
     );
   END IF;
 
-  -- Serialize all scoring work for the same user/kana, including the legacy implementation.
+  -- Serialize scoring work for the same user/kana. The base function takes the same lock again safely.
   PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id || ':' || v_kana_id::text, 0));
   v_period := date_trunc('week', clock_timestamp() AT TIME ZONE 'UTC')::date;
 
@@ -99,11 +94,11 @@ BEGIN
   WHERE user_id = p_user_id AND period_start = v_period AND kana_id = v_kana_id
   FOR UPDATE;
 
-  v_result := nihongo_submit_answer_legacy_impl(
+  v_result := nihongo_submit_answer(
     p_user_id, p_event_id, p_kana_type, p_kana, p_answer_text, p_response_ms
   );
 
-  -- Idempotent event retries were already fully scored on their first submission.
+  -- Idempotent retries were fully processed on their first submission.
   IF coalesce((v_result->>'duplicate')::boolean, false) THEN
     RETURN v_result;
   END IF;
@@ -168,24 +163,6 @@ BEGIN
     'rankingScore', round(coalesce(v_rank, 0), 4)
   );
 END;
-$$;
-
--- Compatibility entry point. Old application instances still use this signature during rollout.
-CREATE OR REPLACE FUNCTION nihongo_submit_answer(
-  p_user_id text,
-  p_event_id uuid,
-  p_kana_type text,
-  p_kana text,
-  p_answer_text text,
-  p_response_ms integer
-)
-RETURNS jsonb
-LANGUAGE sql
-SET search_path = public, pg_temp
-AS $$
-  SELECT nihongo_submit_answer(
-    p_user_id, p_event_id, p_kana_type, p_kana, p_answer_text, p_response_ms, NULL::timestamptz
-  );
 $$;
 
 CREATE OR REPLACE FUNCTION nihongo_reset_progress(p_user_id text, p_scope text)
