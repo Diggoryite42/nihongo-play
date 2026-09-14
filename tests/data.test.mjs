@@ -55,7 +55,7 @@ test('supported romaji systems and common learner variants are preserved',()=>{
     'じ':['ji','zi'],
     'ぢ':['ji','zi','di'],
     'づ':['zu','du'],
-    'を':['wo','o'],
+    'を':['o','wo'],
     'ん':['n','nn'],
     'しゃ':['sha','sya'],
     'しゅ':['shu','syu'],
@@ -71,6 +71,11 @@ test('supported romaji systems and common learner variants are preserved',()=>{
     'ぢょ':['jo','jyo','zyo','dyo'],
   };
   for(const [kana,answers] of Object.entries(expected))assert.deepEqual(find(kana),answers,kana);
+});
+
+test('current standard is displayed first while learner aliases still work',()=>{
+  assert.deepEqual(find('を'),['o','wo']);
+  assert.deepEqual(find('ヲ'),['o','wo']);
 });
 
 test('context-only particle readings are not accepted as single-kana answers',()=>{
