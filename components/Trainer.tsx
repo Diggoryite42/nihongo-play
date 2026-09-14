@@ -161,17 +161,17 @@ export default function Trainer(){
     return rows.sort((a,b)=>a.category.localeCompare(b.category)||a.group_key.localeCompare(b.group_key)||a.id-b.id);
   },[prefs.mode,prefs.selectedGroups]);
 
-  const chooseNext=useCallback(()=>{
+  const chooseNext=useCallback((focusInput=true)=>{
     if(autoNextRef.current!==null){window.clearTimeout(autoNextRef.current);autoNextRef.current=null}
     if(!pool.length){setCurrent(null);setAnswer('');setLocked(false);setFeedback(null);setWeakOpen(false);return}
     const options=[...pool].sort((a,b)=>priority(progressFor(b))-priority(progressFor(a)));
     let next=options[0];
     if(current&&next?.id===current.id&&options.length>1)next=options[1];
     setCurrent(next); setAnswer(''); setLocked(false); setFeedback(null); setWeakOpen(false); setEffect(''); questionStarted.current=Date.now();
-    setTimeout(()=>document.querySelector<HTMLInputElement>('#answer')?.focus(),0);
+    if(focusInput)setTimeout(()=>document.querySelector<HTMLInputElement>('#answer')?.focus({preventScroll:true}),0);
   },[pool,progressFor,current]);
 
-  useEffect(()=>{if(hydrated)chooseNext()},[prefs.mode,prefs.selectedGroups.join(','),hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(hydrated)chooseNext(false)},[prefs.mode,prefs.selectedGroups.join(','),hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadCloud=useCallback(async()=>{
     if(!userId){setRemote({});setRank('Guest');setOnline(false);setSyncText('Guest mode • tiến độ lưu trên máy');return}
