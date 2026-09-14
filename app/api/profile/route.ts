@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { ensureProfile, requireUser } from '@/lib/auth/helpers';
+import { takeRateLimit } from '@/lib/rate-limit';
 
 function normalizeDisplayName(raw: unknown) {
   if (typeof raw !== 'string') return null;
@@ -14,12 +15,19 @@ function normalizeDisplayName(raw: unknown) {
 export async function PATCH(request: NextRequest) {
   try {
     const user = await requireUser();
-    await ensureProfile(user);
-
     const body = await request.json().catch(() => null);
     const displayName = normalizeDisplayName(body?.displayName);
     if (!displayName) return NextResponse.json({ error: 'invalid_name' }, { status: 400 });
 
+    const rate = await takeRateLimit(user.id, 'profile-rename', 10, 600);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'rate_limited', retryAfter: rate.retryAfter },
+        { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } },
+      );
+    }
+
+    await ensureProfile(user);
     const sql = db();
     const taken = await sql`
       SELECT 1 AS ok
