@@ -6,11 +6,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "node scripts/generate-kana.mjs && next dev",
-    "build": "node scripts/generate-kana.mjs && node --test tests/*.test.mjs && node scripts/migrate.mjs && next build",
+    "kana": "node scripts/generate-kana.mjs && node scripts/finalize-kana.mjs",
+    "dev": "npm run kana && next dev",
+    "build": "npm run kana && node --test tests/*.test.mjs && node scripts/migrate.mjs && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/generate-kana.mjs && node --test tests/*.test.mjs"
+    "test": "npm run kana && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@neondatabase/auth": "0.5.0-beta",
