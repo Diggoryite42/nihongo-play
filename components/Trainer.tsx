@@ -66,6 +66,8 @@ function groupLabel(key:string,mode:Mode){
 
 function localUpdate(base:Progress,ok:boolean):Progress{
   const s=normalizeProgress(base),now=Date.now(),mins=s.lastSeen?(now-s.lastSeen)/60000:99999;
+  const wasWeak=s.weakLevel>0;
+  const reviewWasDue=!s.nextDue||s.nextDue<=now;
   const ret=mins<5?1:mins<60?1.05:mins<1440?1.15:mins<4320?1.4:mins<10080?1.6:1.8;
   const delta=ok?4*ret*Math.max(.55,1.15-s.mastery*.006):-(5+(s.lastWrong&&now-s.lastWrong<300000?1:0));
   s.mastery=Math.max(0,Math.min(100,s.mastery+delta));
@@ -80,7 +82,11 @@ function localUpdate(base:Progress,ok:boolean):Progress{
       }
     }
     if(s.reviewFlag){
-      if(s.reviewStep>=REVIEW_DELAYS.length-1){
+      // Weak-repair repetitions may happen before the spaced-review timer is due.
+      // They count toward clearing "Chưa thuộc", but must not consume the 45s→2m→… chain early.
+      if(wasWeak&&!reviewWasDue){
+        // Preserve the existing review step and due time.
+      }else if(s.reviewStep>=REVIEW_DELAYS.length-1){
         s.reviewFlag=false;
         s.reviewStep=0;
         s.nextDue=now+normalDelay(s.mastery);
@@ -105,9 +111,16 @@ function localUpdate(base:Progress,ok:boolean):Progress{
 function priority(raw:Progress){
   const s=normalizeProgress(raw),now=Date.now();
   const overdue=s.nextDue?Math.max(0,(now-s.nextDue)/60000):6;
+  if(s.weakLevel>0){
+    const remaining=Math.max(1,weakTarget(s.weakLevel)-s.weakCorrectStreak);
+    const dueBonus=s.reviewFlag&&(!s.nextDue||s.nextDue<=now)?10+Math.min(10,overdue):0;
+    // "Chưa thuộc" is an active repair queue: keep surfacing it between other cards
+    // until the required consecutive-correct streak clears the weak flag.
+    return 100+s.weakLevel*12+remaining*3+dueBonus+Math.random();
+  }
   if(s.reviewFlag){
-    if(s.nextDue&&s.nextDue>now)return -12+s.weakLevel*.5+Math.random();
-    return 28+s.weakLevel*4+Math.min(10,overdue)+Math.random()*2;
+    if(s.nextDue&&s.nextDue>now)return -12+Math.random();
+    return 28+Math.min(10,overdue)+Math.random()*2;
   }
   return (100-s.mastery)*.08+(s.seen?0:8)+Math.min(8,overdue)+Math.random()*2;
 }
