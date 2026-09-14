@@ -5,7 +5,11 @@ import fs from 'node:fs';
 const pkg=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'));
 const migrate=fs.readFileSync(new URL('../scripts/migrate.mjs',import.meta.url),'utf8');
 const migration=fs.readFileSync(new URL('../db/migrations/20260914_progress_integrity.sql',import.meta.url),'utf8');
+const profileMigration=fs.readFileSync(new URL('../db/migrations/20260914_profile_names.sql',import.meta.url),'utf8');
 const resetRoute=fs.readFileSync(new URL('../app/api/progress/reset/route.ts',import.meta.url),'utf8');
+const profileRoute=fs.readFileSync(new URL('../app/api/profile/route.ts',import.meta.url),'utf8');
+const authHelpers=fs.readFileSync(new URL('../lib/auth/helpers.ts',import.meta.url),'utf8');
+const authControls=fs.readFileSync(new URL('../components/AuthControls.tsx',import.meta.url),'utf8');
 const trainer=fs.readFileSync(new URL('../components/Trainer.tsx',import.meta.url),'utf8');
 const nextConfig=fs.readFileSync(new URL('../next.config.ts',import.meta.url),'utf8');
 const authServer=fs.readFileSync(new URL('../lib/auth/server.ts',import.meta.url),'utf8');
@@ -50,6 +54,24 @@ test('weak kana stay in an active repair queue until the streak clears',()=>{
   assert.match(migration,/v_weak_level_before > 0/);
   assert.match(migration,/v_next_review_before > clock_timestamp\(\)/);
   assert.match(migration,/next_review_at = v_next_review_before/);
+});
+
+test('users can choose one unique public leaderboard name',()=>{
+  assert.match(profileMigration,/CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_display_name_ci/);
+  assert.match(profileMigration,/lower\(display_name\)/);
+  assert.match(profileRoute,/requireUser\(\)/);
+  assert.match(profileRoute,/length < 2 \|\| length > 24/);
+  assert.match(profileRoute,/lower\(display_name\) = lower\(\$\{displayName\}\)/);
+  assert.match(profileRoute,/name_taken/);
+  assert.match(authControls,/Tên này được hiển thị công khai trên bảng xếp hạng tuần/);
+  assert.match(authControls,/fetch\('\/api\/profile'/);
+});
+
+test('session refresh never overwrites a user-selected display name',()=>{
+  const conflictClause=authHelpers.match(/ON CONFLICT\(user_id\) DO UPDATE SET([\s\S]*?)`;/)?.[1]||'';
+  assert.ok(conflictClause);
+  assert.doesNotMatch(conflictClause,/display_name\s*=/);
+  assert.match(authHelpers,/getProfileDisplayName/);
 });
 
 test('reset removes matching queued answers from local storage',()=>{
