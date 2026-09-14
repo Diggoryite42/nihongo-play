@@ -7,6 +7,8 @@ const migrate=fs.readFileSync(new URL('../scripts/migrate.mjs',import.meta.url),
 const migration=fs.readFileSync(new URL('../db/migrations/20260914_progress_integrity.sql',import.meta.url),'utf8');
 const resetRoute=fs.readFileSync(new URL('../app/api/progress/reset/route.ts',import.meta.url),'utf8');
 const trainer=fs.readFileSync(new URL('../components/Trainer.tsx',import.meta.url),'utf8');
+const nextConfig=fs.readFileSync(new URL('../next.config.ts',import.meta.url),'utf8');
+const authServer=fs.readFileSync(new URL('../lib/auth/server.ts',import.meta.url),'utf8');
 
 test('application build never mutates the database',()=>{
   assert.doesNotMatch(pkg.scripts.build,/migrate\.mjs|npm run migrate/);
@@ -43,4 +45,18 @@ test('trainer scores candidates once before sorting',()=>{
 test('reset removes matching queued answers from local storage',()=>{
   assert.match(trainer,/item\.ownerId!==userId\|\|\(resetScope!=='all'&&item\.kanaType!==resetScope\)/);
   assert.match(trainer,/answeredAt:Date\.now\(\)/);
+});
+
+test('production sends a CSP that blocks framing and external code by default',()=>{
+  assert.match(nextConfig,/Content-Security-Policy/);
+  assert.match(nextConfig,/default-src 'self'/);
+  assert.match(nextConfig,/frame-ancestors 'none'/);
+  assert.match(nextConfig,/object-src 'none'/);
+  assert.match(nextConfig,/connect-src 'self' https:\/\/\*\.neon\.tech/);
+});
+
+test('production auth requires an independent cookie secret',()=>{
+  assert.match(authServer,/NEON_AUTH_COOKIE_SECRET must be configured with at least 32 characters/);
+  assert.doesNotMatch(authServer,/auth-cookie:\$\{databaseUrl\}/);
+  assert.doesNotMatch(authServer,/configuredSecret\s*\|\|\s*databaseUrl/);
 });
