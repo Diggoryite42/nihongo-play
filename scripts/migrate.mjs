@@ -4,18 +4,25 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@neondatabase/serverless';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!databaseUrl) {
-  if (process.env.VERCEL) {
-    throw new Error('DATABASE_URL is required on Vercel. Connect the Neon integration before deploying.');
-  }
-  console.warn('[migrate] DATABASE_URL missing; skipping local migration.');
+  console.warn('[migrate] MIGRATION_DATABASE_URL/DATABASE_URL missing; skipping migration.');
   process.exit(0);
 }
 
 const schemaSql = await fs.readFile(path.join(root, 'db', 'schema.sql'), 'utf8');
 const stableIdentitySql = await fs.readFile(path.join(root, 'db', 'stable-kana-identity.sql'), 'utf8');
+const migrationsDir = path.join(root, 'db', 'migrations');
+let migrationFiles = [];
+try {
+  migrationFiles = (await fs.readdir(migrationsDir)).filter(name => name.endsWith('.sql')).sort();
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+const migrationSql = await Promise.all(
+  migrationFiles.map(async name => ({ name, sql: await fs.readFile(path.join(migrationsDir, name), 'utf8') })),
+);
 const kana = JSON.parse(await fs.readFile(path.join(root, 'data', 'kana.json'), 'utf8'));
 const client = new Client(databaseUrl);
 
@@ -24,6 +31,10 @@ try {
   await client.query('BEGIN');
   await client.query(schemaSql);
   await client.query(stableIdentitySql);
+  for (const migration of migrationSql) {
+    await client.query(migration.sql);
+    console.log(`[migrate] applied ${migration.name}`);
+  }
 
   const chunkSize = 50;
   for (let offset = 0; offset < kana.length; offset += chunkSize) {
@@ -49,7 +60,7 @@ try {
   const { rows } = await client.query('SELECT count(*)::int AS count FROM kana_catalog');
   if (rows[0]?.count !== 214) throw new Error(`Expected 214 kana rows, found ${rows[0]?.count}`);
   await client.query('COMMIT');
-  console.log('[migrate] schema ready; 214 kana seeded by stable natural identity');
+  console.log(`[migrate] schema ready; ${migrationFiles.length} versioned migration(s); 214 kana seeded by stable natural identity`);
 } catch (error) {
   try { await client.query('ROLLBACK'); } catch {}
   throw error;
