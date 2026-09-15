@@ -25,6 +25,8 @@ export type SchedulerResult = {
 const RECENT_LIMIT=4;
 const WEAK_GAP=3;
 const REVIEW_GAP=4;
+const WEAK_RECENT_LIMIT=2;
+const REVIEW_RECENT_LIMIT=3;
 
 export function createSchedulerState(scope=''):SchedulerState{
   return {normalBag:[],recent:[],turn:0,lastWeakTurn:-WEAK_GAP,lastReviewTurn:-REVIEW_GAP,scope};
@@ -94,7 +96,7 @@ export function chooseScheduledKana(
   now=Date.now(),
   random:()=>number=Math.random,
 ):SchedulerResult{
-  let state=inputState.scope===scope?inputState:createSchedulerState(scope);
+  const state=inputState.scope===scope?inputState:createSchedulerState(scope);
   if(!cards.length)return finish(state,null,'none');
 
   const weak=cards.filter(c=>c.weakLevel>0);
@@ -102,15 +104,19 @@ export function chooseScheduledKana(
   const normal=cards.filter(c=>c.weakLevel===0&&!c.reviewFlag);
   const futureReview=cards.filter(c=>c.weakLevel===0&&c.reviewFlag&&c.nextDue>now);
 
-  const weakReady=weak.length>0&&state.turn-state.lastWeakTurn>=WEAK_GAP;
-  const reviewReady=dueReview.length>0&&state.turn-state.lastReviewTurn>=REVIEW_GAP;
+  const weakRecent=state.recent.slice(-WEAK_RECENT_LIMIT);
+  const reviewRecent=state.recent.slice(-REVIEW_RECENT_LIMIT);
+  const hasFreshWeak=weak.some(c=>!weakRecent.includes(c.id));
+  const hasFreshReview=dueReview.some(c=>!reviewRecent.includes(c.id));
+  const weakReady=weak.length>0&&state.turn-state.lastWeakTurn>=WEAK_GAP&&(hasFreshWeak||!normal.length);
+  const reviewReady=dueReview.length>0&&state.turn-state.lastReviewTurn>=REVIEW_GAP&&(hasFreshReview||!normal.length);
 
   if(weakReady){
-    const id=pickWeak(weak,state.recent,random);
+    const id=pickWeak(weak,weakRecent,random);
     return finish(state,id,'weak');
   }
   if(reviewReady){
-    const id=pickReview(dueReview,state.recent,random);
+    const id=pickReview(dueReview,reviewRecent,random);
     return finish(state,id,'review');
   }
 
@@ -122,15 +128,15 @@ export function chooseScheduledKana(
   // If every selected kana is flagged, keep the session usable while still
   // respecting the review schedule as much as possible.
   if(weak.length){
-    const id=pickWeak(weak,state.recent,random);
+    const id=pickWeak(weak,weakRecent,random);
     return finish(state,id,'fallback');
   }
   if(dueReview.length){
-    const id=pickReview(dueReview,state.recent,random);
+    const id=pickReview(dueReview,reviewRecent,random);
     return finish(state,id,'fallback');
   }
   if(futureReview.length){
-    const id=pickReview(futureReview,state.recent,random);
+    const id=pickReview(futureReview,reviewRecent,random);
     return finish(state,id,'fallback');
   }
 
