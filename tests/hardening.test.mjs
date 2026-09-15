@@ -11,6 +11,7 @@ const profileRoute=fs.readFileSync(new URL('../app/api/profile/route.ts',import.
 const authHelpers=fs.readFileSync(new URL('../lib/auth/helpers.ts',import.meta.url),'utf8');
 const authControls=fs.readFileSync(new URL('../components/AuthControls.tsx',import.meta.url),'utf8');
 const trainer=fs.readFileSync(new URL('../components/Trainer.tsx',import.meta.url),'utf8');
+const scheduler=fs.readFileSync(new URL('../lib/kana-scheduler.ts',import.meta.url),'utf8');
 const nextConfig=fs.readFileSync(new URL('../next.config.ts',import.meta.url),'utf8');
 const authServer=fs.readFileSync(new URL('../lib/auth/server.ts',import.meta.url),'utf8');
 
@@ -42,13 +43,18 @@ test('reset is atomic, preserves history, and marks stale offline answers',()=>{
   assert.match(migration,/answered_before_progress_reset/);
 });
 
-test('trainer scores candidates once before sorting',()=>{
-  assert.match(trainer,/\.map\(c=>\(\{c,score:priority\(progressFor\(c\)\)\}\)\)/);
-  assert.doesNotMatch(trainer,/sort\(\(a,b\)=>priority\(progressFor\(b\)\)-priority\(progressFor\(a\)\)\)/);
+test('trainer delegates candidate selection to the fair scheduler',()=>{
+  assert.match(trainer,/chooseScheduledKana\(/);
+  assert.match(trainer,/schedulerRef\.current=scheduled\.state/);
+  assert.doesNotMatch(trainer,/score:priority\(progressFor\(c\)\)/);
+  assert.match(scheduler,/const normal=cards\.filter\(c=>c\.weakLevel===0&&!c\.reviewFlag\)/);
+  assert.match(scheduler,/takeNormal\(normal,state,random\)/);
 });
 
 test('weak kana stay in an active repair queue until the streak clears',()=>{
-  assert.match(trainer,/if\(s\.weakLevel>0\)\{[\s\S]*return 100\+s\.weakLevel\*12/);
+  assert.match(scheduler,/const WEAK_GAP=3/);
+  assert.match(scheduler,/const weak=cards\.filter\(c=>c\.weakLevel>0\)/);
+  assert.match(scheduler,/state\.turn-state\.lastWeakTurn>=WEAK_GAP/);
   assert.match(trainer,/const wasWeak=s\.weakLevel>0/);
   assert.match(trainer,/const reviewWasDue=!s\.nextDue\|\|s\.nextDue<=now/);
   assert.match(trainer,/if\(wasWeak&&!reviewWasDue\)/);
