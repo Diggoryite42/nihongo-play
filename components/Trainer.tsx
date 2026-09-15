@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import kanaRows from '@/data/kana.json';
 import { authClient } from '@/lib/auth/client';
+import { chooseScheduledKana, createSchedulerState } from '@/lib/kana-scheduler';
 
 type KanaType = 'hiragana' | 'katakana';
 type Category = 'main' | 'dakuten' | 'combo';
@@ -108,23 +109,6 @@ function localUpdate(base:Progress,ok:boolean):Progress{
   return s;
 }
 
-function priority(raw:Progress){
-  const s=normalizeProgress(raw),now=Date.now();
-  const overdue=s.nextDue?Math.max(0,(now-s.nextDue)/60000):6;
-  if(s.weakLevel>0){
-    const remaining=Math.max(1,weakTarget(s.weakLevel)-s.weakCorrectStreak);
-    const dueBonus=s.reviewFlag&&(!s.nextDue||s.nextDue<=now)?10+Math.min(10,overdue):0;
-    // "Chưa thuộc" is an active repair queue: keep surfacing it between other cards
-    // until the required consecutive-correct streak clears the weak flag.
-    return 100+s.weakLevel*12+remaining*3+dueBonus+Math.random();
-  }
-  if(s.reviewFlag){
-    if(s.nextDue&&s.nextDue>now)return -12+Math.random();
-    return 28+Math.min(10,overdue)+Math.random()*2;
-  }
-  return (100-s.mastery)*.08+(s.seen?0:8)+Math.min(8,overdue)+Math.random()*2;
-}
-
 function uuid(){
   if(typeof crypto!=='undefined'&&crypto.randomUUID)return crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&3|8);return v.toString(16)});
@@ -152,6 +136,7 @@ export default function Trainer(){
   const audioRef=useRef<AudioContext|null>(null);
   const autoNextRef=useRef<number|null>(null);
   const resettingRef=useRef(false);
+  const schedulerRef=useRef(createSchedulerState());
 
   useEffect(()=>{
     const p=safeJson<StoredPrefs>(localStorage.getItem(PREF_KEY),{});
@@ -178,15 +163,22 @@ export default function Trainer(){
   const chooseNext=useCallback((focusInput=true)=>{
     if(autoNextRef.current!==null){window.clearTimeout(autoNextRef.current);autoNextRef.current=null}
     if(!pool.length){setCurrent(null);setAnswer('');setLocked(false);setFeedback(null);setWeakOpen(false);return}
-    const options=pool
-      .map(c=>({c,score:priority(progressFor(c))}))
-      .sort((a,b)=>b.score-a.score)
-      .map(x=>x.c);
-    let next=options[0];
-    if(current&&next?.id===current.id&&options.length>1)next=options[1];
+
+    const scope=`${prefs.mode}|${[...prefs.selectedGroups].sort().join(',')}`;
+    const scheduled=chooseScheduledKana(
+      pool.map(c=>{
+        const s=progressFor(c);
+        return {id:c.id,weakLevel:s.weakLevel,weakCorrectStreak:s.weakCorrectStreak,reviewFlag:s.reviewFlag,nextDue:s.nextDue,lastSeen:s.lastSeen};
+      }),
+      schedulerRef.current,
+      scope,
+    );
+    schedulerRef.current=scheduled.state;
+    const next=pool.find(c=>c.id===scheduled.id) || pool[0];
+
     setCurrent(next); setAnswer(''); setLocked(false); setFeedback(null); setWeakOpen(false); setEffect(''); questionStarted.current=Date.now();
     if(focusInput)setTimeout(()=>document.querySelector<HTMLInputElement>('#answer')?.focus({preventScroll:true}),0);
-  },[pool,progressFor,current]);
+  },[pool,progressFor,prefs.mode,prefs.selectedGroups]);
 
   useEffect(()=>{if(hydrated)chooseNext(false)},[prefs.mode,prefs.selectedGroups.join(','),hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -333,6 +325,7 @@ export default function Trainer(){
         return Object.fromEntries(Object.entries(prev).filter(([k])=>!k.startsWith(resetScope+':')));
       });
     }
+    schedulerRef.current=createSchedulerState();
     setStats({correct:0,wrong:0,streak:0});setWeakOpen(false);chooseNext();
   }
 
