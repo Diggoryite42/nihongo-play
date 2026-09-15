@@ -45,6 +45,23 @@ test('weak kana are repeated but leave at least two intervening questions when n
   assert.ok(sources.includes('normal'));
 });
 
+test('a kana that just became weak is not repeated immediately',()=>{
+  const normalCards=[card(1),card(2),card(3),card(4),card(5),card(6)];
+  let state=createSchedulerState('test');
+  const first=chooseScheduledKana(normalCards,state,'test',1_000_000,deterministic);
+  assert.notEqual(first.id,null);
+  state=first.state;
+
+  const justFailedId=first.id;
+  const withWeak=normalCards.map(c=>c.id===justFailedId?card(c.id,{weakLevel:1,reviewFlag:true,nextDue:1_045_000}):c);
+  const second=chooseScheduledKana(withWeak,state,'test',1_000_001,deterministic);
+  assert.notEqual(second.id,justFailedId);
+  const third=chooseScheduledKana(withWeak,second.state,'test',1_000_002,deterministic);
+  assert.notEqual(third.id,justFailedId);
+  const fourth=chooseScheduledKana(withWeak,third.state,'test',1_000_003,deterministic);
+  assert.equal(fourth.id,justFailedId);
+});
+
 test('due review kana are inserted without starving the normal shuffle bag',()=>{
   const cards=[card(1,{reviewFlag:true,nextDue:500_000}),...Array.from({length:8},(_,i)=>card(i+2))];
   const {picked,sources}=run(cards,24);
